@@ -1,6 +1,6 @@
 # registry-io — API Reference
 
-This document describes every public item in `registry-io 0.4.0`, with
+This document describes every public item in `registry-io 0.5.0`, with
 parameter details, return values, and multiple code examples per use case.
 
 For internal architecture notes, see [ARCHITECTURE.md](./ARCHITECTURE.md) (when
@@ -37,6 +37,17 @@ present). For performance characteristics, see [PERFORMANCE.md](./PERFORMANCE.md
   - [`HandlerGuard::id`](#handlerguardid)
   - [`HandlerGuard::forget`](#handlerguardforget)
   - [`HandlerGuard` drop semantics](#handlerguard-drop-semantics)
+- [Type: `AsyncRegistry<E>` *(feature: `async`)*](#type-asyncregistrye-feature-async)
+  - [`AsyncRegistry::new`](#asyncregistrynew)
+  - [`AsyncRegistry::with_capacity`](#asyncregistrywith_capacity)
+  - [`AsyncRegistry::register`](#asyncregistryregister)
+  - [`AsyncRegistry::register_with_priority`](#asyncregistryregister_with_priority)
+  - [`AsyncRegistry::register_guard` / `register_guard_with_priority`](#asyncregistryregister_guard--register_guard_with_priority)
+  - [`AsyncRegistry::unregister` / `clear` / `contains` / `handler_count` / `is_empty`](#asyncregistryunregister--clear--contains--handler_count--is_empty)
+  - [`AsyncRegistry::on_panic` / `clear_panic_callback`](#asyncregistryon_panic--clear_panic_callback)
+  - [`AsyncRegistry::notify` — concurrent dispatch](#asyncregistrynotify--concurrent-dispatch)
+  - [`AsyncRegistry::notify_sequential` — sequential dispatch](#asyncregistrynotify_sequential--sequential-dispatch)
+- [Type: `AsyncHandlerGuard<E>` *(feature: `async`)*](#type-asynchandlerguarde-feature-async)
 - [Trait implementations](#trait-implementations)
 
 ---
@@ -769,6 +780,255 @@ Guards are `!Clone` — ownership of a registration is unique.
 
 ---
 
+## Type: `AsyncRegistry<E>` *(feature: `async`)*
+
+```rust
+pub struct AsyncRegistry<E: Send + Sync + 'static> { /* opaque */ }
+```
+
+The asynchronous counterpart to [`SyncRegistry`](#type-syncregistrye). Same
+lock-free [`arc_swap::ArcSwap`]-backed storage; handlers return a `'static`
+future that the registry drives via the crate-local [`JoinAll`] combinator
+(concurrent) or sequentially.
+
+Each handler future is wrapped in an internal `CatchUnwind` adapter so a
+panic during `poll` is isolated from sibling handlers and from the awaiting
+caller.
+
+Path: `registry_io::r#async::AsyncRegistry` (re-exported at the crate root as
+`registry_io::AsyncRegistry` when the `async` feature is enabled).
+
+### `AsyncRegistry::new`
+
+```rust
+pub fn new() -> Self;
+```
+
+Construct an empty async registry.
+
+```rust
+# #[cfg(feature = "async")] {
+use registry_io::r#async::AsyncRegistry;
+let registry: AsyncRegistry<u32> = AsyncRegistry::new();
+assert!(registry.is_empty());
+# }
+```
+
+### `AsyncRegistry::with_capacity`
+
+```rust
+pub fn with_capacity(capacity: usize) -> Self;
+```
+
+Pre-allocate the internal `Vec` for `capacity` handlers.
+
+```rust
+# #[cfg(feature = "async")] {
+use registry_io::r#async::AsyncRegistry;
+let registry: AsyncRegistry<u64> = AsyncRegistry::with_capacity(64);
+assert!(registry.is_empty());
+# }
+```
+
+### `AsyncRegistry::register`
+
+```rust
+pub fn register<F, Fut>(&self, handler: F) -> HandlerId
+where
+    F: Fn(&E) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = ()> + Send + 'static;
+```
+
+Register an async handler at default priority `0`. The handler is a closure
+that receives `&E` and returns a `'static` future. Clone what you need out
+of `&E` before the inner `async move`:
+
+```rust
+# #[cfg(feature = "async")] async fn _doc() {
+use registry_io::r#async::AsyncRegistry;
+let registry: AsyncRegistry<String> = AsyncRegistry::new();
+let _ = registry.register(|event| {
+    let owned = event.clone();
+    async move {
+        let _ = owned.len();
+    }
+});
+# }
+```
+
+### `AsyncRegistry::register_with_priority`
+
+```rust
+pub fn register_with_priority<F, Fut>(&self, priority: i32, handler: F) -> HandlerId
+where
+    F: Fn(&E) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = ()> + Send + 'static;
+```
+
+Same ordering rules as [`SyncRegistry::register_with_priority`]. In
+concurrent dispatch priority controls the order futures are *spawned* into
+the join, not the order they *resolve* — for execution-order guarantees,
+use `notify_sequential`.
+
+```rust
+# #[cfg(feature = "async")] async fn _doc() {
+use registry_io::r#async::AsyncRegistry;
+let registry: AsyncRegistry<()> = AsyncRegistry::new();
+let _ = registry.register_with_priority(100, |_| async move {});
+let _ = registry.register(|_| async move {});
+let _ = registry.register_with_priority(-10, |_| async move {});
+assert_eq!(registry.handler_count(), 3);
+# }
+```
+
+### `AsyncRegistry::register_guard` / `register_guard_with_priority`
+
+```rust
+pub fn register_guard<F, Fut>(self: &Arc<Self>, handler: F) -> AsyncHandlerGuard<E>;
+pub fn register_guard_with_priority<F, Fut>(self: &Arc<Self>, priority: i32, handler: F) -> AsyncHandlerGuard<E>;
+```
+
+RAII variants. Drop the returned [`AsyncHandlerGuard`] to unregister; call
+`forget()` to detach.
+
+```rust
+# #[cfg(feature = "async")] {
+use std::sync::Arc;
+use registry_io::r#async::AsyncRegistry;
+let registry = Arc::new(AsyncRegistry::<u32>::new());
+{
+    let _guard = registry.register_guard(|_| async move {});
+    assert_eq!(registry.handler_count(), 1);
+}
+assert_eq!(registry.handler_count(), 0);
+# }
+```
+
+### `AsyncRegistry::unregister` / `clear` / `contains` / `handler_count` / `is_empty`
+
+Identical signatures and semantics to the sync side. See the
+`SyncRegistry` section above.
+
+### `AsyncRegistry::on_panic` / `clear_panic_callback`
+
+Same `PanicInfo` callback as on the sync side; fires once per panicking
+handler during a `notify*` call. Second-order panics inside the callback are
+caught and discarded.
+
+```rust
+# #[cfg(feature = "async")] async fn _doc() {
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use registry_io::r#async::AsyncRegistry;
+
+let registry: AsyncRegistry<()> = AsyncRegistry::new();
+let count = Arc::new(AtomicUsize::new(0));
+let sink = Arc::clone(&count);
+registry.on_panic(move |_| {
+    let _ = sink.fetch_add(1, Ordering::Relaxed);
+});
+
+let _ = registry.register(|_| async move { panic!("oops") });
+let _ = registry.register(|_| async move {});
+registry.notify(&()).await;
+assert_eq!(count.load(Ordering::Relaxed), 1);
+# }
+```
+
+### `AsyncRegistry::notify` — concurrent dispatch
+
+```rust
+pub async fn notify(&self, event: &E);
+```
+
+Builds one future per handler and drives them concurrently via the
+crate-local `JoinAll`. Total wall-clock equals the **slowest** handler when
+each handler does real `.await` work.
+
+```rust
+# #[cfg(feature = "async")] async fn _doc() {
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+use registry_io::r#async::AsyncRegistry;
+
+let registry: AsyncRegistry<u32> = AsyncRegistry::new();
+let total = Arc::new(AtomicU32::new(0));
+for _ in 0..4 {
+    let sink = Arc::clone(&total);
+    let _ = registry.register(move |value| {
+        let sink = Arc::clone(&sink);
+        let v = *value;
+        async move {
+            sink.fetch_add(v, Ordering::Relaxed);
+        }
+    });
+}
+registry.notify(&10).await;
+assert_eq!(total.load(Ordering::Relaxed), 40);
+# }
+```
+
+### `AsyncRegistry::notify_sequential` — sequential dispatch
+
+```rust
+pub async fn notify_sequential(&self, event: &E);
+```
+
+Awaits each handler's future to completion before starting the next. Use
+this when handlers must observe a happens-before relation with one another.
+
+```rust
+# #[cfg(feature = "async")] async fn _doc() {
+use std::sync::{Arc, Mutex};
+use registry_io::r#async::AsyncRegistry;
+
+let registry: AsyncRegistry<()> = AsyncRegistry::new();
+let log: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
+
+let l = Arc::clone(&log);
+let _ = registry.register_with_priority(10, move |_| {
+    let l = Arc::clone(&l);
+    async move { l.lock().unwrap().push("first"); }
+});
+let l = Arc::clone(&log);
+let _ = registry.register(move |_| {
+    let l = Arc::clone(&l);
+    async move { l.lock().unwrap().push("second"); }
+});
+
+registry.notify_sequential(&()).await;
+assert_eq!(log.lock().unwrap().as_slice(), &["first", "second"]);
+# }
+```
+
+---
+
+## Type: `AsyncHandlerGuard<E>` *(feature: `async`)*
+
+```rust
+#[must_use = "..."]
+pub struct AsyncHandlerGuard<E: Send + Sync + 'static> { /* opaque */ }
+```
+
+RAII handle for an async registration. Drop to unregister; `forget()` to
+detach. Same drop-order safety as [`HandlerGuard`](#type-handlerguarde): the
+guard holds a [`std::sync::Weak`] to the registry, so registry-before-guard
+drop is a no-op.
+
+### `AsyncHandlerGuard::id`
+
+```rust
+pub fn id(&self) -> HandlerId;
+```
+
+### `AsyncHandlerGuard::forget`
+
+```rust
+pub fn forget(self);
+```
+
+---
+
 ## Trait implementations
 
 | Type                    | `Send` | `Sync` | `Debug` | `Default` | `Clone` |
@@ -777,6 +1037,8 @@ Guards are `!Clone` — ownership of a registration is unique.
 | `PanicInfo<'_>`         | (n/a)  | (n/a)  | ✓       | ✗         | ✗       |
 | `SyncRegistry<E>`       | ✓      | ✓      | ✓       | ✓         | ✗       |
 | `HandlerGuard<E>`       | ✓      | ✓      | ✓       | ✗         | ✗       |
+| `AsyncRegistry<E>`      | ✓      | ✓      | ✓       | ✓         | ✗       |
+| `AsyncHandlerGuard<E>`  | ✓      | ✓      | ✓       | ✗         | ✗       |
 
 All types upholding `Send + Sync` do so for any `E: Send + Sync + 'static`.
 
@@ -788,10 +1050,10 @@ All types upholding `Send + Sync` do so for any `E: Send + Sync + 'static`.
 |------------|:-------:|----------------------------------------------------------|
 | `std`      | ✓       | Standard library. Required for sync / async registries. |
 | `sync`     | ✓       | Enables `SyncRegistry`. Implies `std`.                  |
-| `async`    | ✗       | Reserved for `AsyncRegistry` (≥ 0.5.0). Implies `std`.  |
+| `async`    | ✗       | Enables `AsyncRegistry` and `AsyncHandlerGuard`. Implies `std`. |
 | `hybrid`   | ✗       | Activates both `sync` and `async`.                      |
 | `metrics`  | ✗       | Reserved for built-in metrics integration.              |
 
 ---
 
-<sub>registry-io v0.4.0 — Copyright © 2026 James Gober. Apache-2.0 OR MIT.</sub>
+<sub>registry-io v0.5.0 — Copyright © 2026 James Gober. Apache-2.0 OR MIT.</sub>

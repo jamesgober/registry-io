@@ -189,7 +189,7 @@ If any number is not verified by a committed benchmark, the version that claims 
 
 ---
 
-## Phase 0.5.0 - AsyncRegistry (feature-gated)
+## Phase 0.5.0 - AsyncRegistry (feature-gated)  *(shipped in v0.5.0)*
 
 **Goal:** Async handler support via `async` feature flag.
 
@@ -197,27 +197,26 @@ If any number is not verified by a committed benchmark, the version that claims 
 
 ### Tasks
 
-- [ ] **Feature flag `async`** in Cargo.toml (already declared)
-- [ ] **`AsyncRegistry<E>`** type:
-  - Same internal storage pattern as SyncRegistry
-  - Handler type: `Arc<dyn Fn(&E) -> BoxFuture<'static, ()> + Send + Sync + 'static>`
-- [ ] **`AsyncRegistry::register<F, Fut>(handler: F) -> HandlerId`**
+- [x] **Feature flag `async`** in Cargo.toml (`async = ["std"]`)
+- [x] **`AsyncRegistry<E>`** type:
+  - Same internal storage pattern as SyncRegistry (`ArcSwap<Vec<AsyncHandlerEntry<E>>>`)
+  - Handler type: `Arc<dyn Fn(&E) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> + Send + Sync + 'static>`
+- [x] **`AsyncRegistry::register<F, Fut>(handler: F) -> HandlerId`**
   - Where F: Fn(&E) -> Fut + Send + Sync + 'static
   - Fut: Future<Output = ()> + Send + 'static
-- [ ] **`AsyncRegistry::notify(&self, event: &E)` - returns `impl Future<Output = ()>`**
-  - Concurrent dispatch via `futures::future::join_all`
-  - Or sequential via `for_each` (decision based on benchmarks)
-- [ ] **`AsyncRegistry::notify_sequential(&self, event: &E)`** - explicit sequential variant
-- [ ] **Panic isolation** in async handlers (futures can panic too)
-- [ ] **Async benchmark** comparing to sync overhead
-- [ ] **Async examples** in examples/
-- [ ] Tests using `tokio::test`
+- [x] **`AsyncRegistry::notify(&self, event: &E)` - concurrent dispatch**
+  - Concurrent via crate-local `JoinAll` (in-tree, no `futures-util`)
+- [x] **`AsyncRegistry::notify_sequential(&self, event: &E)`** - explicit sequential variant
+- [x] **Panic isolation** in async handlers via crate-local `CatchUnwind` adapter
+- [x] **Async benchmark** (`benches/async_notify.rs`) — concurrent and sequential at N=0,1,4,16
+- [x] **Async examples** in examples/ (`async_basic`, `async_concurrent_vs_sequential`)
+- [x] Tests using `tokio::test` (38 async integration tests + 4 future_ext unit tests)
 
 ### Exit criteria
 
-- [ ] `AsyncRegistry` functional
-- [ ] Feature flag works (sync still compiles without `async`)
-- [ ] Async overhead documented vs sync
+- [x] `AsyncRegistry` functional
+- [x] Feature flag works (sync still compiles without `async`; async still compiles without `sync`)
+- [x] Async overhead documented in `docs/PERFORMANCE.md` (full numbers measured in 0.6.0)
 
 ---
 

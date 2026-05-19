@@ -40,9 +40,12 @@
 
 ## Status
 
-**Active development.** v0.4.0 ships the complete synchronous foundation:
-`SyncRegistry`, priority ordering, panic isolation, and RAII guards. See
-[`.dev/ROADMAP.md`](.dev/ROADMAP.md) for the path to 1.0.
+**Active development.** v0.5.0 adds the asynchronous side:
+`AsyncRegistry` with concurrent + sequential dispatch, `AsyncHandlerGuard`,
+panic isolation across `.await`, behind the `async` feature flag. The
+synchronous side (v0.4.0) — `SyncRegistry`, priority ordering, RAII guards,
+panic isolation — remains the default. See [`.dev/ROADMAP.md`](.dev/ROADMAP.md)
+for the path to 1.0.
 
 Public API is **not** yet frozen — minor releases may break it. Pin specific
 versions; expect changes pre-1.0.
@@ -52,15 +55,18 @@ versions; expect changes pre-1.0.
 ## Highlights
 
 - **`SyncRegistry<E>`** — generic over the event type. Handlers receive `&E`.
+- **`AsyncRegistry<E>`** *(feature: `async`)* — same lock-free storage,
+  futures-returning handlers, concurrent or sequential dispatch.
 - **Lock-free reads** via `ArcSwap` snapshots. Many threads can `notify`
   concurrently with no coordination.
-- **Zero allocation** on the no-panic notify path.
+- **Zero allocation** on the no-panic sync notify path.
 - **Panic isolation** — a panicking handler does not stop siblings nor
   propagate to the caller. Optional `on_panic` callback for observability.
+  Works for both sync handlers and async futures.
 - **Priority ordering** — `register_with_priority(i32, ...)`. Higher fires
   first; ties broken in registration order.
-- **RAII guards** — `register_guard` returns a `HandlerGuard` that
-  unregisters on drop.
+- **RAII guards** — `register_guard` returns a `HandlerGuard` /
+  `AsyncHandlerGuard` that unregisters on drop.
 - **`Send + Sync`** — share registries freely across threads.
 - **Cross-platform** — Linux, macOS, Windows.
 
@@ -165,6 +171,50 @@ let _ = registry.register(|_| panic!("oops"));
 let _ = registry.register(|_| println!("still ran"));
 registry.notify(&()); // returns cleanly; both effects observed
 ```
+
+### Async handlers *(feature: `async`)*
+
+```toml
+[dependencies]
+registry-io = { version = "0.5", features = ["async"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+```
+
+```rust,no_run
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+use registry_io::r#async::AsyncRegistry;
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() {
+    let registry: AsyncRegistry<u32> = AsyncRegistry::new();
+    let total = Arc::new(AtomicU32::new(0));
+
+    for _ in 0..4 {
+        let sink = Arc::clone(&total);
+        let _ = registry.register(move |value| {
+            let sink = Arc::clone(&sink);
+            let v = *value;
+            async move {
+                tokio::task::yield_now().await;
+                sink.fetch_add(v, Ordering::Relaxed);
+            }
+        });
+    }
+
+    // Concurrent dispatch — all 4 futures run in parallel.
+    registry.notify(&10).await;
+    assert_eq!(total.load(Ordering::Relaxed), 40);
+
+    // Sequential dispatch — awaits each handler in priority order.
+    registry.notify_sequential(&10).await;
+    assert_eq!(total.load(Ordering::Relaxed), 80);
+}
+```
+
+Same lock-free read path as `SyncRegistry`. Panics in handler futures are
+caught via an internal `CatchUnwind` adapter and surfaced through
+`on_panic`, just like sync handlers.
 
 See [`examples/`](examples/) for runnable programs and [`docs/API.md`](docs/API.md)
 for the full reference.

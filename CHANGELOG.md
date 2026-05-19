@@ -19,6 +19,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.5.0] - 2026-05-19
+
+This release adds the **asynchronous** registry surface (`AsyncRegistry`)
+behind the `async` feature flag, plus the supporting future-combinator
+primitives required to run async handlers with the same panic-isolation
+guarantees as the sync side.
+
+### Added
+
+- **`AsyncRegistry<E>`** — async-handler counterpart to `SyncRegistry`.
+  Same lock-free `ArcSwap`-backed storage; handlers return a `'static`
+  future of `()`. Methods: `new`, `with_capacity`, `register`,
+  `register_with_priority`, `register_guard`, `register_guard_with_priority`,
+  `unregister`, `clear`, `contains`, `handler_count`, `is_empty`,
+  `on_panic`, `clear_panic_callback`, `notify` (concurrent), and
+  `notify_sequential`. Re-exported at the crate root as
+  `registry_io::AsyncRegistry` when the `async` feature is on.
+- **`AsyncHandlerGuard<E>`** — RAII guard for async registrations.
+  `#[must_use]`, drop-to-unregister, `forget()` to detach. Holds a
+  `Weak<AsyncRegistry<E>>` so the registry can be dropped before the guard
+  safely.
+- **`crate::future_ext::CatchUnwind`** — internal future adapter that wraps
+  each handler future and catches panics escaping `poll`. Mirrors
+  `std::panic::catch_unwind` for the async path.
+- **`crate::future_ext::JoinAll`** — internal future combinator that drives
+  a `Vec<F>` of futures concurrently and resolves to a `Vec<F::Output>` in
+  input order. Written in-tree to keep the dependency surface minimal
+  (no `futures-util`).
+- **`pub mod r#async`** — public module exposing the async registry and
+  guard at `registry_io::r#async`.
+- **Tests** — 38 new async integration tests covering registration, notify
+  (both modes), priority ordering, panic isolation in both dispatch modes,
+  guard drop semantics, panic-callback replacement and clearing, and
+  custom panic payload round-trips. All exercised via `#[tokio::test]`.
+- **Bench** — `benches/async_notify.rs` with concurrent and sequential
+  scenarios at handler counts `0, 1, 4, 16`.
+- **Examples** — `examples/async_basic.rs` and
+  `examples/async_concurrent_vs_sequential.rs`. Both gated by
+  `required-features = ["async"]` in `Cargo.toml`.
+- **Documentation** — `docs/API.md` extended with the full `AsyncRegistry`
+  and `AsyncHandlerGuard` reference, each with multiple runnable code
+  examples. `README.md` quick-start now includes an async snippet.
+
+### Changed
+
+- **`Cargo.toml`** — version bumped to `0.5.0`; added `[[bench]]` for
+  `async_notify` and `[[example]]` entries for the two new async examples,
+  all gated by `required-features = ["async"]`. `tokio` dev-dependency now
+  also enables the `time` feature (used by the
+  `async_concurrent_vs_sequential` example).
+- **`src/lib.rs`** — `panic` module is now gated on
+  `any(feature = "sync", feature = "async")` (it's shared by both
+  registries); `PanicInfo` re-export updated accordingly. New
+  feature-gated `pub mod r#async;` declaration with `#[path]` pointing at
+  `async_registry/mod.rs`.
+
+[Unreleased]: https://github.com/jamesgober/registry-io/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/jamesgober/registry-io/releases/tag/v0.5.0
+
+---
+
 ## [0.4.0] - 2026-05-19
 
 This release ships the complete synchronous foundation: a fully functional
@@ -81,7 +142,6 @@ milestone.
   unwind-related state corruption in callers.
 - No `unsafe` code in the public API.
 
-[Unreleased]: https://github.com/jamesgober/registry-io/compare/v0.4.0...HEAD
 [0.4.0]: https://github.com/jamesgober/registry-io/releases/tag/v0.4.0
 
 ---

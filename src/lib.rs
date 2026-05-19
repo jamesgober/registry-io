@@ -64,7 +64,7 @@
 //!
 //! Dual-licensed under Apache-2.0 OR MIT.
 
-#![doc(html_root_url = "https://docs.rs/registry-io/0.4.0")]
+#![doc(html_root_url = "https://docs.rs/registry-io/0.5.0")]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(not(feature = "std"), no_std)]
 #![deny(missing_docs)]
@@ -90,21 +90,32 @@ extern crate std;
 
 mod handler_id;
 
-#[cfg(feature = "sync")]
+#[cfg(any(feature = "sync", feature = "async"))]
 mod panic;
+
+#[cfg(feature = "async")]
+mod future_ext;
 
 #[cfg(feature = "sync")]
 pub mod sync;
 
+#[cfg(feature = "async")]
+#[path = "async_registry/mod.rs"]
+pub mod r#async;
+
 pub use handler_id::HandlerId;
 
-#[cfg(feature = "sync")]
-#[cfg_attr(docsrs, doc(cfg(feature = "sync")))]
+#[cfg(any(feature = "sync", feature = "async"))]
+#[cfg_attr(docsrs, doc(cfg(any(feature = "sync", feature = "async"))))]
 pub use panic::PanicInfo;
 
 #[cfg(feature = "sync")]
 #[cfg_attr(docsrs, doc(cfg(feature = "sync")))]
 pub use sync::{HandlerGuard, SyncRegistry};
+
+#[cfg(feature = "async")]
+#[cfg_attr(docsrs, doc(cfg(feature = "async")))]
+pub use r#async::{AsyncHandlerGuard, AsyncRegistry};
 
 /// Crate version string, populated by Cargo at build time.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

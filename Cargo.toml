@@ -1,6 +1,6 @@
 [package]
 name = "registry-io"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.85"
 readme = "README.md"
@@ -65,8 +65,8 @@ arc-swap = "1.7"
 futures-core = { version = "0.3", optional = true, default-features = false }
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 
 [[bench]]
 name = "sync_notify"
@@ -75,6 +75,19 @@ harness = false
 [[bench]]
 name = "register_unregister"
 harness = false
+
+[[bench]]
+name = "async_notify"
+harness = false
+required-features = ["async"]
+
+[[example]]
+name = "async_basic"
+required-features = ["async"]
+
+[[example]]
+name = "async_concurrent_vs_sequential"
+required-features = ["async"]
 
 [profile.release]
 opt-level = 3
