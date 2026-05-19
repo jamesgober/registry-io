@@ -1,0 +1,37 @@
+[package]
+name = "registry-io-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+rust-version = "1.85"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+
+[dependencies.registry-io]
+path = ".."
+features = ["sync"]
+
+# Fuzz binaries are wired manually so the crate compiles even without
+# `cargo-fuzz` being installed.
+
+[[bin]]
+name = "handler_churn"
+path = "fuzz_targets/handler_churn.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "event_payload"
+path = "fuzz_targets/event_payload.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+debug = 1

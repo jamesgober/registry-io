@@ -1,6 +1,6 @@
 [package]
 name = "registry-io"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 rust-version = "1.85"
 readme = "README.md"
@@ -75,6 +75,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"
 # Used only by `tests/zero_alloc.rs` under the `dhat-heap` feature. Kept in
 # dev-dependencies so it never appears in downstream crate graphs.
 dhat = "0.3"
+# Property-based invariant verification (`tests/proptest_invariants.rs`).
+proptest = { version = "1", default-features = false, features = ["std"] }
 
 [[bench]]
 name = "sync_notify"

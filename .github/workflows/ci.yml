@@ -9,10 +9,6 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
-  # Opt every JavaScript-based action (e.g. actions/cache@v4) into Node.js 24
-  # ahead of the June 2026 default switch, silencing the "Node.js 20 actions
-  # are deprecated" warning surfaced by current runners.
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   check:
@@ -33,7 +29,11 @@ jobs:
           toolchain: ${{ matrix.rust }}
           components: clippy, rustfmt
       - name: Cache
-        uses: actions/cache@v4
+        # v5 targets Node.js 24 natively. v4 declared `using: node20` in its
+        # action.yml, which produced a deprecation warning on every CI run
+        # even when `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24` forced it onto
+        # Node 24 at runtime.
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry

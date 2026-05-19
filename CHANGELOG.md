@@ -19,6 +19,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.0] - 2026-05-19
+
+Hardening milestone. Property-based invariant testing,
+`Arc`-strong-count leak verification, a fuzz-target scaffold for
+`cargo-fuzz`, and a published threat model.
+
+### Added
+
+- **`tests/proptest_invariants.rs`** — six property tests over random
+  operation sequences: register-then-unregister round-trip leaves the
+  registry empty; `notify` fires exactly once per registered handler;
+  handler ids stay unique across arbitrary churn; `handler_count`
+  matches external bookkeeping; stale ids always return `false` from
+  `unregister`; `clear()` does not let subsequent ids collide with
+  pre-clear ids.
+- **`tests/leak_check.rs`** — three `Arc::strong_count` canary tests
+  covering 10 000 register / unregister cycles, `clear()` after 100
+  registrations, and registry drop while 50 handlers are live.
+- **`fuzz/` workspace scaffold** — `cargo-fuzz`-ready Cargo manifest
+  plus two fuzz targets:
+  - `handler_churn` — random sequences of register / unregister /
+    clear / notify ops against a fresh `SyncRegistry`, with invariant
+    checks after each step. Includes panicky handlers in the rotation.
+  - `event_payload` — registers a fixed handler set and dispatches
+    arbitrary event payloads, exercising the dispatch path against
+    adversarial bytes.
+  - `fuzz/.gitignore` excludes `target/`, `corpus/`, `artifacts/`,
+    `coverage/`.
+- **`docs/SECURITY.md`** — threat model, unsafe-code discipline, panic
+  isolation in detail, fuzzing methodology, leak/zero-alloc
+  verification summary, CI gate inventory, vulnerability reporting
+  process.
+- **`proptest` dev-dependency** — `proptest = "1"` (default features
+  off, `std` only) — used exclusively in `tests/proptest_invariants.rs`.
+
+### Changed
+
+- **`Cargo.toml`** — version `0.6.0` → `0.7.0`; added `proptest`
+  dev-dep.
+- **`.github/workflows/ci.yml`** — bumped `actions/cache@v4` to
+  `actions/cache@v5`. v5 declares `using: node24` in its manifest, so
+  the `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24` env var added in 0.6.0 is no
+  longer needed and was removed. CI runs are now warning-free for the
+  Node.js deprecation pipeline.
+
+### Security
+
+- Public API remains free of `unsafe`. Verified by inspection;
+  documented in `docs/SECURITY.md`.
+- Panic isolation invariants newly covered by property tests and fuzz
+  targets in addition to the existing example-based tests.
+- Memory-leak posture across register / unregister churn and registry
+  drop newly covered by `tests/leak_check.rs`.
+
+[Unreleased]: https://github.com/jamesgober/registry-io/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/jamesgober/registry-io/releases/tag/v0.7.0
+
+---
+
 ## [0.6.0] - 2026-05-19
 
 Performance verification milestone. The full benchmark suite has been

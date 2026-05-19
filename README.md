@@ -40,12 +40,17 @@
 
 ## Status
 
-**Active development.** v0.6.0 ships the performance verification: the
-full benchmark suite has been executed and every target in the
-Performance Contract is met with significant headroom — sync `notify` at
-**~10 ns / 1 handler / 1 thread**, **~25 ns / 4 handlers / 16 threads**
-contended, and `dhat`-verified **zero heap allocations** on the hot path.
-The async side ships at **~180 ns / 1 handler** concurrent. See
+**Active development.** v0.7.0 is the hardening milestone:
+property-based invariant tests via `proptest`, an `Arc::strong_count`
+leak canary over 10 000 register/unregister cycles, a `cargo-fuzz`
+target scaffold, and a published [threat model](docs/SECURITY.md). The
+public API contains zero `unsafe` code.
+
+v0.6.0 shipped the performance verification: every target in the
+Performance Contract is met with significant headroom — sync `notify`
+at **~10 ns / 1 handler / 1 thread**, **~25 ns / 4 handlers / 16
+threads** contended, and `dhat`-verified **zero heap allocations** on
+the hot path. Async concurrent dispatch is **~180 ns / 1 handler**. See
 [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) for the full measurements.
 
 v0.5.0 added `AsyncRegistry` with concurrent + sequential dispatch,
