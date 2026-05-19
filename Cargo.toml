@@ -1,0 +1,78 @@
+﻿[package]
+name = "registry-io"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.75"
+readme = "README.md"
+license = "Apache-2.0 OR MIT"
+
+authors = [
+    "James Gober <me@jamesgober.com>"
+]
+
+description = "High-performance event/callback registry for Rust. Sync-first with optional async. Lock-free reads, zero-allocation hot path, sub-50ns notify target. Designed as the foundation primitive for portfolio crates needing fast in-process notification."
+
+keywords = [
+    "registry",
+    "callbacks",
+    "observer",
+    "events",
+    "rust"
+]
+
+categories = [
+    "rust-patterns",
+    "concurrency",
+    "asynchronous"
+]
+
+documentation = "https://docs.rs/registry-io"
+repository    = "https://github.com/jamesgober/registry-io"
+homepage      = "https://github.com/jamesgober/registry-io"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[lib]
+name = "registry_io"
+path = "src/lib.rs"
+
+[features]
+default = ["std", "sync"]
+
+# Core feature flags
+std = []                              # Standard library (default on)
+sync = []                             # Synchronous registry (default on)
+async = ["dep:futures-core"]          # Async-aware registry
+hybrid = ["sync", "async"]            # Hybrid sync + async registry
+
+# Optional integrations
+metrics = []                          # Built-in metrics on the registry itself
+
+[dependencies]
+# Lock-free atomic snapshot updates
+arc-swap = "1.7"
+
+# Optional - async support
+futures-core = { version = "0.3", optional = true, default-features = false }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+
+[[bench]]
+name = "registry_bench"
+harness = false
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+
+[profile.bench]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+debug = true
