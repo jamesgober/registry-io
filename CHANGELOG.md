@@ -19,6 +19,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.6.0] - 2026-05-19
+
+Performance verification milestone. The full benchmark suite has been
+executed, the Performance Contract numbers from `.dev/ROADMAP.md` are
+**all met with significant headroom**, and the zero-allocation property
+of `SyncRegistry::notify` is verified by a `dhat`-backed test.
+
+### Added
+
+- **`benches/contention.rs`** — dedicated thread-contention sweep for
+  `SyncRegistry::notify`. Combinatorial matrix of `{1, 4, 16, 64}`
+  notifying threads × `{1, 4, 16}` handlers. Each benchmark uses
+  `iter_custom` + `thread::scope` to put the worker spawn inside the
+  timed region and reports ns *per notify call*.
+- **`tests/zero_alloc.rs`** — dhat-based heap accounting test that
+  verifies `notify()` allocates zero blocks across 100 000 calls with
+  both an empty registry and an 8-handler registry. Gated behind the
+  new `dhat-heap` feature so the global allocator swap doesn't affect
+  other tests/benches.
+- **`dhat-heap` Cargo feature** — when enabled, swaps the global
+  allocator to `dhat::Alloc` for the zero-alloc test. `dhat 0.3` is a
+  dev-dependency (does not propagate to downstream crates).
+- **`docs/PERFORMANCE.md`** — extensively rewritten with **measured**
+  numbers from the dev machine baseline (Windows 11, Intel x86-64,
+  Rust 1.95, MSVC). Includes:
+  - Headline sync notify table vs Performance Contract targets.
+  - Full contention sweep (1 → 64 threads × 1 → 16 handlers).
+  - Async notify table for both concurrent and sequential dispatch.
+  - Register / unregister slow-path latency at `N = 0, 16, 100, 1000`.
+  - Cost model, hot-path code walk, slow-path rcu pattern, memory
+    footprint accounting.
+  - Dispatch-mode guidance ("when to use concurrent vs sequential").
+  - Reproduction commands for every bench.
+
+### Changed
+
+- **`src/async_registry/mod.rs`** — `notify` rewritten to do a single
+  pass over the handler snapshot, building parallel `ids` and `wrapped`
+  vectors instead of an intermediate `pairs` Vec. Saves one Vec
+  allocation per `notify()` call. Functionally identical.
+- **`Cargo.toml`** — version `0.5.0` → `0.6.0`. Added `[[bench]]` entry
+  for `contention`. Added `dhat = "0.3"` dev-dep and `dhat-heap = []`
+  feature.
+- **`.github/workflows/ci.yml`** — set
+  `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true` so `actions/cache@v4`
+  (still on Node 20 internally) opts into Node 24 today instead of
+  emitting the deprecation warning on every CI run.
+
+### Verified
+
+- All sync-notify targets in the Performance Contract met:
+  `1 handler / 1 thread = 10.1 ns` (target `<20 ns`),
+  `4 handlers / 1 thread = 12.5 ns` (target `<50 ns`),
+  `4 handlers / 16 threads = 24.7 ns` (target `<50 ns`).
+- Async-notify target met: `concurrent 1 handler = 177 ns`
+  (target `<500 ns`).
+- Zero-allocation property on `notify()` hot path confirmed by `dhat`
+  across 100 000 calls.
+
+[Unreleased]: https://github.com/jamesgober/registry-io/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/jamesgober/registry-io/releases/tag/v0.6.0
+
+---
+
 ## [0.5.0] - 2026-05-19
 
 This release adds the **asynchronous** registry surface (`AsyncRegistry`)

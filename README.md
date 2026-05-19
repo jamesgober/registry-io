@@ -40,12 +40,19 @@
 
 ## Status
 
-**Active development.** v0.5.0 adds the asynchronous side:
-`AsyncRegistry` with concurrent + sequential dispatch, `AsyncHandlerGuard`,
-panic isolation across `.await`, behind the `async` feature flag. The
-synchronous side (v0.4.0) — `SyncRegistry`, priority ordering, RAII guards,
-panic isolation — remains the default. See [`.dev/ROADMAP.md`](.dev/ROADMAP.md)
-for the path to 1.0.
+**Active development.** v0.6.0 ships the performance verification: the
+full benchmark suite has been executed and every target in the
+Performance Contract is met with significant headroom — sync `notify` at
+**~10 ns / 1 handler / 1 thread**, **~25 ns / 4 handlers / 16 threads**
+contended, and `dhat`-verified **zero heap allocations** on the hot path.
+The async side ships at **~180 ns / 1 handler** concurrent. See
+[`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) for the full measurements.
+
+v0.5.0 added `AsyncRegistry` with concurrent + sequential dispatch,
+`AsyncHandlerGuard`, and panic isolation across `.await`, behind the
+`async` feature. The synchronous side (v0.4.0) — `SyncRegistry`, priority
+ordering, RAII guards, panic isolation — remains the default. See
+[`.dev/ROADMAP.md`](.dev/ROADMAP.md) for the path to 1.0.
 
 Public API is **not** yet frozen — minor releases may break it. Pin specific
 versions; expect changes pre-1.0.

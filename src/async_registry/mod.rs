@@ -376,20 +376,18 @@ impl<E: Send + Sync + 'static> AsyncRegistry<E> {
             return;
         }
 
-        // Build (id, future) pairs first so we can attribute panics to the
-        // correct handler after the join resolves.
-        let mut pairs = Vec::with_capacity(snapshot.len());
+        // Single pass over the snapshot, producing parallel `ids` and
+        // `wrapped` vectors so we can attribute each post-join outcome
+        // back to its originating handler. `JoinAll` preserves input
+        // order, so a positional zip is exact and saves the intermediate
+        // `pairs` allocation the prior implementation needed.
+        let n = snapshot.len();
+        let mut ids: Vec<HandlerId> = Vec::with_capacity(n);
+        let mut wrapped = Vec::with_capacity(n);
         for entry in snapshot.iter() {
-            let fut = (entry.handler)(event);
-            pairs.push((entry.id, fut));
+            ids.push(entry.id);
+            wrapped.push(CatchUnwind::new((entry.handler)(event)));
         }
-        // Decouple ids from futures: `JoinAll` returns outputs in the same
-        // order as inputs, so we can rezip by index after the await.
-        let ids: Vec<HandlerId> = pairs.iter().map(|(id, _)| *id).collect();
-        let wrapped: Vec<_> = pairs
-            .into_iter()
-            .map(|(_, fut)| CatchUnwind::new(fut))
-            .collect();
         let results = JoinAll::new(wrapped).await;
 
         for (id, outcome) in ids.into_iter().zip(results) {

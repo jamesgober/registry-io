@@ -1,6 +1,6 @@
 [package]
 name = "registry-io"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.85"
 readme = "README.md"
@@ -56,6 +56,11 @@ hybrid = ["sync", "async"]
 # Optional integrations (placeholders, no code yet).
 metrics = []
 
+# Flips on the `dhat`-backed zero-allocation verification test
+# (`tests/zero_alloc.rs`). Off by default because it replaces the global
+# allocator with `dhat::Alloc`, which would skew unrelated benchmarks.
+dhat-heap = []
+
 [dependencies]
 # Lock-free atomic snapshot updates of the handler list.
 arc-swap = "1.7"
@@ -67,6 +72,9 @@ futures-core = { version = "0.3", optional = true, default-features = false }
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+# Used only by `tests/zero_alloc.rs` under the `dhat-heap` feature. Kept in
+# dev-dependencies so it never appears in downstream crate graphs.
+dhat = "0.3"
 
 [[bench]]
 name = "sync_notify"
@@ -80,6 +88,10 @@ harness = false
 name = "async_notify"
 harness = false
 required-features = ["async"]
+
+[[bench]]
+name = "contention"
+harness = false
 
 [[example]]
 name = "async_basic"
