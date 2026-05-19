@@ -1,0 +1,22 @@
+# Force Unix LF line endings for all text source so rustfmt (which enforces
+# `newline_style = "Unix"`) passes on Windows CI runners where git's
+# default `core.autocrlf = true` would otherwise convert LF to CRLF on
+# checkout.
+
+*               text=auto eol=lf
+
+*.rs            text eol=lf
+*.toml          text eol=lf
+*.md            text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+*.json          text eol=lf
+*.lock          text eol=lf
+
+LICENSE*        text eol=lf
+README*         text eol=lf
+.gitignore      text eol=lf
+.gitattributes  text eol=lf
+.editorconfig   text eol=lf
+rustfmt.toml    text eol=lf
+clippy.toml     text eol=lf
