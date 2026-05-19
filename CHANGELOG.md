@@ -19,6 +19,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.9.0] - 2026-05-19
+
+Documentation pass. Three new long-form docs land in this release —
+the v1.0 stability contract, the internal architecture walk-through,
+and the per-platform behavior notes — and the public rustdoc surface
+is now audit-complete (every non-trivial public item carries at least
+one runnable `# Examples` block).
+
+This is the gate to the `1.0.0-rc.1` cut.
+
+### Added
+
+- **`docs/STABILITY-1.0.md`** — the v1.0 stability contract. Lists
+  every public item that is frozen for the lifetime of v1.x with its
+  behavioral guarantees; specifies what may still change in v1.x
+  (additions, internal details); pins MSRV at 1.85, edition at 2024,
+  license at Apache-2.0 OR MIT; defines deprecation and yank policies;
+  enumerates the CI gates that enforce the contract.
+- **`docs/ARCHITECTURE.md`** — internal structure walk-through.
+  ASCII big-picture diagram of the storage model; full file-tree map
+  (src/, tests/, benches/, examples/, fuzz/); hot-path code excerpt
+  with measured-cost decomposition; slow-path rcu pattern explained;
+  async-side mirroring rules; design-decision rationale (why
+  `E: Send + Sync + 'static` at the type level, why monotonic ids,
+  why panic isolation by default, why no embedded async runtime);
+  "adding a new feature" checklist for contributors.
+- **`docs/PLATFORM-NOTES.md`** — per-platform behavior nuances.
+  Platform support matrix (Linux/macOS/Windows on stable + MSRV;
+  WASM and no_std listed unsupported); per-platform behavior notes
+  including the Windows SEH unwind characteristics; build
+  prerequisites; CI matrix walk-through; known quirks
+  (`dhat::Profiler` process-global constraint, stable-Rust feature
+  gates, allocator interactions); bug-reporting checklist for
+  platform-specific issues.
+
+### Changed
+
+- **Rustdoc audit complete.** The `AsyncRegistry` methods
+  `register_guard_with_priority`, `clear`, `handler_count`,
+  `is_empty`, `contains`, `on_panic`, and `clear_panic_callback`
+  previously had documentation but lacked `# Examples` sections;
+  each now has at least one runnable example, exercised by
+  `cargo test --doc`. Doctest count: 26 → **46**.
+- **`pub const VERSION`** now has a runnable `# Examples` block.
+- **README.md** Documentation section surfaces all five long-form
+  docs (`API.md`, `PATTERNS.md`, `ARCHITECTURE.md`, `PERFORMANCE.md`,
+  `SECURITY.md`, `STABILITY-1.0.md`, `PLATFORM-NOTES.md`).
+- **README.md** Status section rewritten to highlight v0.9.0 as the
+  pre-RC docs pass; previous-release blurbs reflowed.
+- **Version footers and prose refs** swept across `docs/API.md`,
+  `docs/PATTERNS.md`, `docs/PERFORMANCE.md`, `docs/SECURITY.md` from
+  `v0.8.0` to `v0.9.0`. README install snippets bumped from `"0.8"`
+  to `"0.9"`. `src/lib.rs#html_root_url` bumped to `0.9.0`.
+- **Cargo.toml** — version `0.8.0` → `0.9.0`. No new dependencies.
+
+[Unreleased]: https://github.com/jamesgober/registry-io/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/jamesgober/registry-io/releases/tag/v0.9.0
+
+---
+
 ## [0.8.0] - 2026-05-19
 
 Integration-validation milestone. Four canonical integration patterns

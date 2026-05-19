@@ -257,7 +257,27 @@ impl<E: Send + Sync + 'static> AsyncRegistry<E> {
     }
 
     /// Like [`AsyncRegistry::register_guard`] but with an explicit
-    /// priority value.
+    /// priority value. Higher priorities fire first; ties broken in
+    /// registration order. See
+    /// [`AsyncRegistry::register_with_priority`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use registry_io::r#async::AsyncRegistry;
+    ///
+    /// let registry = Arc::new(AsyncRegistry::<&'static str>::new());
+    /// let _hi = registry.register_guard_with_priority(100, |evt| {
+    ///     let s = *evt;
+    ///     async move { let _ = s; }
+    /// });
+    /// let _lo = registry.register_guard_with_priority(-5, |evt| {
+    ///     let s = *evt;
+    ///     async move { let _ = s; }
+    /// });
+    /// assert_eq!(registry.handler_count(), 2);
+    /// ```
     pub fn register_guard_with_priority<F, Fut>(
         self: &Arc<Self>,
         priority: i32,
@@ -299,11 +319,35 @@ impl<E: Send + Sync + 'static> AsyncRegistry<E> {
     ///
     /// In-flight `notify*` calls that already loaded the snapshot still run
     /// every handler in their snapshot to completion.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use registry_io::r#async::AsyncRegistry;
+    ///
+    /// let registry: AsyncRegistry<()> = AsyncRegistry::new();
+    /// for _ in 0..5 {
+    ///     let _ = registry.register(|_| async move {});
+    /// }
+    /// registry.clear();
+    /// assert_eq!(registry.handler_count(), 0);
+    /// ```
     pub fn clear(&self) {
         self.handlers.store(Arc::new(Vec::new()));
     }
 
-    /// Current handler count.
+    /// Current handler count. `O(1)` atomic snapshot.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use registry_io::r#async::AsyncRegistry;
+    ///
+    /// let registry: AsyncRegistry<()> = AsyncRegistry::new();
+    /// assert_eq!(registry.handler_count(), 0);
+    /// let _ = registry.register(|_| async move {});
+    /// assert_eq!(registry.handler_count(), 1);
+    /// ```
     #[inline]
     #[must_use]
     pub fn handler_count(&self) -> usize {
@@ -311,6 +355,17 @@ impl<E: Send + Sync + 'static> AsyncRegistry<E> {
     }
 
     /// `true` if no handlers are registered.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use registry_io::r#async::AsyncRegistry;
+    ///
+    /// let registry: AsyncRegistry<()> = AsyncRegistry::new();
+    /// assert!(registry.is_empty());
+    /// let _ = registry.register(|_| async move {});
+    /// assert!(!registry.is_empty());
+    /// ```
     #[inline]
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -318,12 +373,49 @@ impl<E: Send + Sync + 'static> AsyncRegistry<E> {
     }
 
     /// `true` if a handler with `id` is currently registered.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use registry_io::r#async::AsyncRegistry;
+    ///
+    /// let registry: AsyncRegistry<()> = AsyncRegistry::new();
+    /// let id = registry.register(|_| async move {});
+    /// assert!(registry.contains(id));
+    /// assert!(registry.unregister(id));
+    /// assert!(!registry.contains(id));
+    /// ```
     #[must_use]
     pub fn contains(&self, id: HandlerId) -> bool {
         self.handlers.load().iter().any(|e| e.id == id)
     }
 
-    /// Install a panic callback. See [`crate::SyncRegistry::on_panic`].
+    /// Install a panic callback fired once per panicking handler future
+    /// during `notify*`. Replaces any previously installed callback.
+    /// Second-order panics inside the callback itself are caught and
+    /// discarded.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() {
+    /// use std::sync::Arc;
+    /// use std::sync::atomic::{AtomicUsize, Ordering};
+    /// use registry_io::r#async::AsyncRegistry;
+    ///
+    /// let registry: AsyncRegistry<()> = AsyncRegistry::new();
+    /// let count = Arc::new(AtomicUsize::new(0));
+    /// let sink = Arc::clone(&count);
+    /// registry.on_panic(move |_| {
+    ///     let _ = sink.fetch_add(1, Ordering::Relaxed);
+    /// });
+    ///
+    /// let _ = registry.register(|_| async move { panic!("oops") });
+    /// registry.notify(&()).await;
+    /// assert_eq!(count.load(Ordering::Relaxed), 1);
+    /// # }
+    /// ```
     pub fn on_panic<F>(&self, callback: F)
     where
         F: Fn(&PanicInfo<'_>) + Send + Sync + 'static,
@@ -332,7 +424,18 @@ impl<E: Send + Sync + 'static> AsyncRegistry<E> {
         self.panic_callback.store(Some(holder));
     }
 
-    /// Remove any previously installed panic callback.
+    /// Remove any previously installed panic callback. Subsequent
+    /// handler panics during `notify*` become silent.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use registry_io::r#async::AsyncRegistry;
+    ///
+    /// let registry: AsyncRegistry<()> = AsyncRegistry::new();
+    /// registry.on_panic(|_| {});
+    /// registry.clear_panic_callback();
+    /// ```
     pub fn clear_panic_callback(&self) {
         self.panic_callback.store(None);
     }

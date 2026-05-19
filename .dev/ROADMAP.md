@@ -312,7 +312,7 @@ If any number is not verified by a committed benchmark, the version that claims 
 
 ---
 
-## Phase 0.9.0 - Documentation + Release Candidate
+## Phase 0.9.0 - Documentation + Release Candidate  *(documentation portion shipped in v0.9.0; RC cut pending)*
 
 **Goal:** Final documentation pass. Cut `1.0.0-rc.1`.
 
@@ -320,21 +320,22 @@ If any number is not verified by a committed benchmark, the version that claims 
 
 ### Tasks
 
-- [ ] **Write `docs/STABILITY-1.0.md`** - the 1.0 contract
-- [ ] **Write `docs/ARCHITECTURE.md`** - internal structure, lock-free read pattern, ArcSwap usage
-- [ ] **Verify `docs/PERFORMANCE.md`** (from 0.6.0)
-- [ ] **Verify `docs/SECURITY.md`** (from 0.7.0)
-- [ ] **Verify `docs/PATTERNS.md`** (from 0.8.0)
-- [ ] **`docs/PLATFORM-NOTES.md`** if cross-platform behavior has any nuances
-- [ ] **Audit every public item's rustdoc**
-- [ ] **Write `docs/release-notes/v1.0.0.md`** per `_strategy/RELEASE_NOTES_TEMPLATE.md`
-- [ ] **Cut `1.0.0-rc.1`** per `_strategy/RELEASE_WORKFLOW.md`
+- [x] **Write `docs/STABILITY-1.0.md`** - the 1.0 contract (shipped in v0.9.0)
+- [x] **Write `docs/ARCHITECTURE.md`** - internal structure, lock-free read pattern, ArcSwap usage (shipped in v0.9.0)
+- [x] **Verify `docs/PERFORMANCE.md`** (refreshed to v0.9.0 header/footer)
+- [x] **Verify `docs/SECURITY.md`** (refreshed to v0.9.0 header/footer)
+- [x] **Verify `docs/PATTERNS.md`** (refreshed to v0.9.0 footer)
+- [x] **`docs/PLATFORM-NOTES.md`** (shipped in v0.9.0)
+- [x] **Audit every public item's rustdoc** — every non-trivial public item now has at least one runnable `# Examples` block; doctest count 26 → 46
+- [ ] **Write `.dev/release/v1.0.0.md`** per the in-tree release-notes template — *prepared during the RC cut*
+- [ ] **Cut `1.0.0-rc.1`** — *next user-driven step after this milestone is published*
 - [ ] **Soak period** - 1 week minimum
 - [ ] **Iterate on rc.N if needed**
+- [ ] **1-CPU-hour fuzz soak** carried over from 0.7.0 — to run during the RC soak window
 
 ### Exit criteria
 
-- [ ] All docs in place
+- [x] All docs in place
 - [ ] `1.0.0-rc.1` published to crates.io as pre-release
 - [ ] 1 week soak with no critical issues
 

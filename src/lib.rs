@@ -64,7 +64,7 @@
 //!
 //! Dual-licensed under Apache-2.0 OR MIT.
 
-#![doc(html_root_url = "https://docs.rs/registry-io/0.8.0")]
+#![doc(html_root_url = "https://docs.rs/registry-io/0.9.0")]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(not(feature = "std"), no_std)]
 #![deny(missing_docs)]
@@ -118,4 +118,13 @@ pub use sync::{HandlerGuard, SyncRegistry};
 pub use r#async::{AsyncHandlerGuard, AsyncRegistry};
 
 /// Crate version string, populated by Cargo at build time.
+///
+/// # Examples
+///
+/// ```
+/// // VERSION is the canonical place to read the running crate version,
+/// // for diagnostic logging or version-gated behavior.
+/// assert!(!registry_io::VERSION.is_empty());
+/// assert!(registry_io::VERSION.starts_with("0.") || registry_io::VERSION.starts_with("1."));
+/// ```
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

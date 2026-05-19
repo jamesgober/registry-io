@@ -63,7 +63,18 @@
 
 ## Status
 
-**Active development.** v0.7.0 is the hardening milestone:
+**Active development — release-candidate gate.** v0.9.0 is the final
+pre-1.0 documentation pass: a v1.0 stability contract
+([STABILITY-1.0.md](docs/STABILITY-1.0.md)), internal architecture
+walk-through ([ARCHITECTURE.md](docs/ARCHITECTURE.md)), and
+per-platform behavior notes ([PLATFORM-NOTES.md](docs/PLATFORM-NOTES.md))
+all land in this release. The next release will be `1.0.0-rc.1`.
+
+v0.8.0 added the integration-pattern reference
+([PATTERNS.md](docs/PATTERNS.md)) with four canonical patterns plus
+runnable examples for each.
+
+v0.7.0 was the hardening milestone:
 property-based invariant tests via `proptest`, an `Arc::strong_count`
 leak canary over 10 000 register/unregister cycles, a `cargo-fuzz`
 target scaffold, and a published [threat model](docs/SECURITY.md). The
@@ -113,7 +124,7 @@ Use `registry-io` when you have:
 
 ```toml
 [dependencies]
-registry-io = "0.8"
+registry-io = "0.9"
 ```
 
 ```rust
@@ -193,7 +204,7 @@ registry.notify(&()); // returns cleanly; both effects observed
 
 ```toml
 [dependencies]
-registry-io = { version = "0.8", features = ["async"] }
+registry-io = { version = "0.9", features = ["async"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 
@@ -257,10 +268,16 @@ for the full reference.
 - [`docs/PATTERNS.md`](docs/PATTERNS.md) — four canonical integration
   patterns (hot reload, audit fan-out, metric events, transaction
   hooks), each with a runnable example.
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — internal structure
+  walk-through, hot/slow path code excerpts, design decisions.
 - [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) — cost model, benchmarks, and
   concurrency characteristics.
 - [`docs/SECURITY.md`](docs/SECURITY.md) — threat model, panic isolation
   detail, fuzz methodology.
+- [`docs/STABILITY-1.0.md`](docs/STABILITY-1.0.md) — the v1.0
+  stability contract (what's frozen, what can change).
+- [`docs/PLATFORM-NOTES.md`](docs/PLATFORM-NOTES.md) — per-platform
+  behavior nuances (Linux/macOS/Windows).
 - [`.dev/ROADMAP.md`](.dev/ROADMAP.md) — milestone plan to 1.0.
 - [`CHANGELOG.md`](CHANGELOG.md) — release history.
 
