@@ -4,7 +4,7 @@
     <b>registry-io</b>
     <br>
     <sub>
-        <sup>HIGH-PERFORMANCE EVENT REGISTRY PRIMITIVE</sup>
+        <sup>EVENT REGISTRY FOR RUST</sup>
     </sub>
 </h1>
 
@@ -17,8 +17,8 @@
 </p>
 
 <p align="center">
-    <b>High-Performance Event Registry for Rust</b>
-    <br>
+    <b>High-Performance Event and Callback Registry Primitive</b>
+    <br><br>
     <i>Sync-first with optional async. Lock-free reads, zero-allocation hot path, sub-50ns notify target.</i>
 </p>
 
@@ -37,6 +37,29 @@
 </p>
 
 ---
+
+
+## Highlights
+
+- **Cross-platform** — Linux, macOS, Windows.
+- **Lock-free reads** via `ArcSwap` snapshots. Many threads can `notify`
+  concurrently with no coordination.
+- **Zero allocation** on the no-panic sync notify path.
+- **Panic isolation** — a panicking handler does not stop siblings nor
+  propagate to the caller. Optional `on_panic` callback for observability.
+  Works for both sync handlers and async futures.
+- **Priority ordering** — `register_with_priority(i32, ...)`. Higher fires
+  first; ties broken in registration order.
+- **`SyncRegistry<E>`** — generic over the event type. Handlers receive `&E`.
+- **`AsyncRegistry<E>`** *(feature: `async`)* — same lock-free storage,
+  futures-returning handlers, concurrent or sequential dispatch.
+- **RAII guards** — `register_guard` returns a `HandlerGuard` /
+  `AsyncHandlerGuard` that unregisters on drop.
+- **`Send + Sync`** — share registries freely across threads.
+
+
+---
+
 
 ## Status
 
@@ -64,51 +87,33 @@ versions; expect changes pre-1.0.
 
 ---
 
-## Highlights
-
-- **`SyncRegistry<E>`** — generic over the event type. Handlers receive `&E`.
-- **`AsyncRegistry<E>`** *(feature: `async`)* — same lock-free storage,
-  futures-returning handlers, concurrent or sequential dispatch.
-- **Lock-free reads** via `ArcSwap` snapshots. Many threads can `notify`
-  concurrently with no coordination.
-- **Zero allocation** on the no-panic sync notify path.
-- **Panic isolation** — a panicking handler does not stop siblings nor
-  propagate to the caller. Optional `on_panic` callback for observability.
-  Works for both sync handlers and async futures.
-- **Priority ordering** — `register_with_priority(i32, ...)`. Higher fires
-  first; ties broken in registration order.
-- **RAII guards** — `register_guard` returns a `HandlerGuard` /
-  `AsyncHandlerGuard` that unregisters on drop.
-- **`Send + Sync`** — share registries freely across threads.
-- **Cross-platform** — Linux, macOS, Windows.
-
----
-
 ## When to use it
 
 Use `registry-io` when you have:
 
-- Multiple components that need notification when something happens (config
-  reload, file change, transaction commit, metric event, etc.).
-- Fast, in-process handlers measured in microseconds or less.
-- A need to register and unregister handlers dynamically.
-- Performance-critical paths where channel allocation would dominate.
+- Multiple components that need **notification** when something happens (`config`
+  `reload`, `file change`, `transaction commit`, `metric event`, etc.).
+- Fast, **in-process handlers** measured in microseconds or less.
+- A need to **register** and **unregister** handlers dynamically.
+- **Performance-critical paths** where **channel allocation** would dominate.
 
 **Do not** use `registry-io` when you have:
 
-- Cross-process or cross-network delivery needs — use NATS, Redis pub/sub,
+- **Cross-process** or **cross-network** delivery needs — use NATS, Redis pub/sub,
   or similar message brokers.
-- Heavy handler workloads requiring backpressure — use
+- **Heavy handler** workloads requiring backpressure — use
   `tokio::sync::broadcast` or channels.
-- Event sourcing or durability requirements — use a real event log.
+- **Event sourcing** or **durability** requirements — use a real event log.
 
 ---
+
+&nbsp;
 
 ## Quick start
 
 ```toml
 [dependencies]
-registry-io = "0.4"
+registry-io = "0.7"
 ```
 
 ```rust
@@ -188,7 +193,7 @@ registry.notify(&()); // returns cleanly; both effects observed
 
 ```toml
 [dependencies]
-registry-io = { version = "0.5", features = ["async"] }
+registry-io = { version = "0.7", features = ["async"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 
@@ -282,6 +287,10 @@ submitted for inclusion in the work by you, as defined in the Apache-2.0
 license, shall be dual licensed as above, without any additional terms or
 conditions.
 
----
 
-<sub>Copyright &copy; 2026 <strong>James Gober</strong>. All rights reserved.</sub>
+<!-- COPYRIGHT
+############################################# -->
+<div align="center">
+  <h2></h2>
+  <sup>COPYRIGHT <small>&copy;</small> 2026 <strong>JAMES GOBER.</strong></sup>
+</div>
