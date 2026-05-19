@@ -4,8 +4,9 @@
 //! handler closures keyed by [`HandlerId`] and dispatches an event to every
 //! handler when [`SyncRegistry::notify`] is called. The notify path is
 //! lock-free, allocation-free, and panic-isolating.
-
-#![cfg(feature = "sync")]
+//!
+//! The whole module is gated behind the `sync` feature at the `pub mod sync`
+//! declaration in `src/lib.rs`; no inner `#![cfg]` is needed here.
 
 use core::any::Any;
 use core::fmt;
