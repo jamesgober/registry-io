@@ -1,4 +1,4 @@
-﻿<h1 align="center">
+<h1 align="center">
     <img width="99" alt="Rust logo" src="https://raw.githubusercontent.com/jamesgober/rust-collection/72baabd71f00e14aa9184efcb16fa3deddda3a0a/assets/rust-logo.svg">
     <br>
     <b>registry-io</b>
@@ -10,10 +10,10 @@
 
 <p align="center">
     <a href="https://crates.io/crates/registry-io"><img src="https://img.shields.io/crates/v/registry-io.svg" alt="Crates.io"></a>
-    <a href="https://crates.io/crates/registry-io"><img alt="downloads" src="https://img.shields.io/crates/d/=%230099ff"></a>
+    <a href="https://crates.io/crates/registry-io"><img alt="downloads" src="https://img.shields.io/crates/d/registry-io.svg?color=%230099ff"></a>
     <a href="https://docs.rs/registry-io"><img src="https://docs.rs/registry-io/badge.svg" alt="Documentation"></a>
     <a href="https://github.com/jamesgober/registry-io/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/jamesgober/registry-io/actions/workflows/ci.yml/badge.svg"></a>
-    <a href="#license"><img src="https://img.shields.io/badge/license-Apache--2.0%20OR%20MIT-blue.svg" alt="License"></a>
+    <a href="https://github.com/rust-lang/rfcs/blob/master/text/2495-min-rust-version.md" title="MSRV"><img alt="MSRV" src="https://img.shields.io/badge/MSRV-1.85%2B-blue"></a>
 </p>
 
 <p align="center">
@@ -25,40 +25,44 @@
 <br>
 
 <p>
-    <strong>registry-io</strong> is a high-performance event and callback registry primitive for Rust. It provides a focused alternative to channel-based notification when you need multiple handlers responding to the same event with minimal dispatch overhead. Built from the ground up with a lock-free read path and zero-allocation discipline on the hot path, it targets sub-50ns notify latency for synchronous handlers.
+    <strong>registry-io</strong> is a high-performance event and callback registry primitive for Rust. It provides a focused alternative to channel-based notification when several components need to react to the same in-process event with the lowest possible dispatch overhead. The hot path is <strong>lock-free</strong>, <strong>allocation-free</strong>, and <strong>panic-isolating</strong>.
 </p>
 
 <p>
-    Unlike pub/sub brokers and distributed messaging systems, <strong>registry-io</strong> stays focused on a single problem: fast in-process notification. A sync-first design means handlers run inline on the producer's thread with minimal coordination overhead. Optional async support is available via feature flag for handlers that genuinely need to await I/O, but the sync path remains the fast path and pays zero cost for users who don't need async.
+    Unlike pub/sub brokers and distributed messaging systems, <strong>registry-io</strong> stays focused on a single problem: fast in-process notification. A sync-first design means handlers run inline on the producer's thread with minimal coordination overhead. Optional async support is reserved for a future release; sync users pay zero cost for features they don't use.
 </p>
 
 <p>
-    With its lock-free architecture, <strong>registry-io</strong> uses <code>ArcSwap</code> snapshots for reader-side access and atomic clone-then-swap for writer-side updates. This means many threads can fire notifications simultaneously without blocking each other, while handler registration and unregistration happen on a separate slow path that does not interfere with the hot read path.
+    With its lock-free architecture, <strong>registry-io</strong> uses <a href="https://docs.rs/arc-swap"><code>ArcSwap</code></a> snapshots for reader-side access and atomic clone-then-swap for writer-side updates. Many threads can fire notifications simultaneously without blocking each other, while handler registration and unregistration happen on a separate slow path that does not interfere with the hot read path.
 </p>
 
 ---
 
 ## Status
 
-**Active development.** Scaffolded and on the path to 1.0. See [.dev/ROADMAP.md](.dev/ROADMAP.md) for milestone tracking.
+**Active development.** v0.4.0 ships the complete synchronous foundation:
+`SyncRegistry`, priority ordering, panic isolation, and RAII guards. See
+[`.dev/ROADMAP.md`](.dev/ROADMAP.md) for the path to 1.0.
 
-The public API is not yet stable. Pin specific versions; expect changes pre-1.0.
-
----
-
-## What it does
-
-High-performance event/callback registry for Rust. Sync-first with optional async. Lock-free reads, zero-allocation hot path, sub-50ns notify target. Designed as the foundation primitive for portfolio crates needing fast in-process notification.
+Public API is **not** yet frozen — minor releases may break it. Pin specific
+versions; expect changes pre-1.0.
 
 ---
 
-## Design philosophy
+## Highlights
 
-- **Sync-first.** The fast path is synchronous, runs on the calling thread, allocates nothing, and dispatches in nanoseconds.
-- **Async-capable.** Async handlers are available via opt-in feature flag for handlers that need to await I/O.
-- **Lock-free reads.** Multiple threads can call `notify()` concurrently without contention.
-- **Zero allocation on hot path.** Notify walks the handler list and dispatches without any heap allocation.
-- **Focused scope.** This is a local, in-process notification primitive. NOT a message bus, NOT a distributed event system, NOT a pub/sub broker.
+- **`SyncRegistry<E>`** — generic over the event type. Handlers receive `&E`.
+- **Lock-free reads** via `ArcSwap` snapshots. Many threads can `notify`
+  concurrently with no coordination.
+- **Zero allocation** on the no-panic notify path.
+- **Panic isolation** — a panicking handler does not stop siblings nor
+  propagate to the caller. Optional `on_panic` callback for observability.
+- **Priority ordering** — `register_with_priority(i32, ...)`. Higher fires
+  first; ties broken in registration order.
+- **RAII guards** — `register_guard` returns a `HandlerGuard` that
+  unregisters on drop.
+- **`Send + Sync`** — share registries freely across threads.
+- **Cross-platform** — Linux, macOS, Windows.
 
 ---
 
@@ -66,17 +70,19 @@ High-performance event/callback registry for Rust. Sync-first with optional asyn
 
 Use `registry-io` when you have:
 
-- Multiple components that need notification when something happens (file change, config update, transaction commit, metric event)
-- Fast, in-process handlers (microseconds or less)
-- Same-thread or cross-thread but not cross-process delivery
-- A need to register and unregister handlers dynamically
-- Performance-critical paths where channel allocation would dominate
+- Multiple components that need notification when something happens (config
+  reload, file change, transaction commit, metric event, etc.).
+- Fast, in-process handlers measured in microseconds or less.
+- A need to register and unregister handlers dynamically.
+- Performance-critical paths where channel allocation would dominate.
 
-**Do NOT use `registry-io` when you have:**
+**Do not** use `registry-io` when you have:
 
-- Cross-process or cross-network delivery needs (use NATS, Redis pub/sub, or similar)
-- Heavy handler workloads requiring backpressure (use `tokio::sync::broadcast` or channels)
-- Event sourcing or durability requirements (use a real event log)
+- Cross-process or cross-network delivery needs — use NATS, Redis pub/sub,
+  or similar message brokers.
+- Heavy handler workloads requiring backpressure — use
+  `tokio::sync::broadcast` or channels.
+- Event sourcing or durability requirements — use a real event log.
 
 ---
 
@@ -84,23 +90,117 @@ Use `registry-io` when you have:
 
 ```toml
 [dependencies]
-registry-io = "0.1"
+registry-io = "0.4"
 ```
 
 ```rust
-// Examples land as the public API stabilizes.
-// See `examples/` and the rustdoc once 0.2 ships.
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+use registry_io::SyncRegistry;
+
+let registry: SyncRegistry<u32> = SyncRegistry::new();
+let total = Arc::new(AtomicU32::new(0));
+
+let sink = Arc::clone(&total);
+let id = registry.register(move |value| {
+    sink.fetch_add(*value, Ordering::Relaxed);
+});
+
+registry.notify(&5);
+registry.notify(&7);
+assert_eq!(total.load(Ordering::Relaxed), 12);
+
+assert!(registry.unregister(id));
 ```
+
+### Priority ordering
+
+```rust
+use std::sync::{Arc, Mutex};
+use registry_io::SyncRegistry;
+
+let registry: SyncRegistry<()> = SyncRegistry::new();
+let order = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+
+let o = Arc::clone(&order);
+let _ = registry.register_with_priority(100, move |_| o.lock().unwrap().push("audit"));
+let o = Arc::clone(&order);
+let _ = registry.register(move |_| o.lock().unwrap().push("business"));
+let o = Arc::clone(&order);
+let _ = registry.register_with_priority(-50, move |_| o.lock().unwrap().push("cleanup"));
+
+registry.notify(&());
+assert_eq!(order.lock().unwrap().as_slice(), &["audit", "business", "cleanup"]);
+```
+
+### RAII guards
+
+```rust
+use std::sync::Arc;
+use registry_io::SyncRegistry;
+
+let registry = Arc::new(SyncRegistry::<u32>::new());
+{
+    let _guard = registry.register_guard(|n| println!("scoped: {n}"));
+    registry.notify(&1);
+} // guard drops here -> handler is unregistered
+assert!(registry.is_empty());
+```
+
+### Panic isolation
+
+```rust
+use registry_io::SyncRegistry;
+
+let registry: SyncRegistry<()> = SyncRegistry::new();
+registry.on_panic(|info| {
+    eprintln!(
+        "handler {} panicked: {}",
+        info.handler_id(),
+        info.message().unwrap_or("<opaque>")
+    );
+});
+
+let _ = registry.register(|_| panic!("oops"));
+let _ = registry.register(|_| println!("still ran"));
+registry.notify(&()); // returns cleanly; both effects observed
+```
+
+See [`examples/`](examples/) for runnable programs and [`docs/API.md`](docs/API.md)
+for the full reference.
+
+---
+
+## Design philosophy
+
+- **Sync-first.** The fast path is synchronous, runs on the calling thread,
+  allocates nothing, and dispatches in nanoseconds.
+- **Lock-free reads.** Multiple threads can call `notify()` concurrently
+  without contention.
+- **Zero allocation on the hot path.** Notify walks the handler list and
+  dispatches without any heap allocation in the no-panic case.
+- **Focused scope.** This is a local, in-process notification primitive.
+  Not a message bus, not a distributed event system, not a pub/sub broker.
+
+---
+
+## Documentation
+
+- [`docs/API.md`](docs/API.md) — full API reference with examples per item.
+- [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) — cost model, benchmarks, and
+  concurrency characteristics.
+- [`.dev/ROADMAP.md`](.dev/ROADMAP.md) — milestone plan to 1.0.
+- [`CHANGELOG.md`](CHANGELOG.md) — release history.
 
 ---
 
 ## Standards
 
-- **REPS** (Rust Efficiency & Performance Standards) governs every decision. See [REPS.md](REPS.md).
-- **MSRV:** Rust 1.75.
+- **REPS** (Rust Efficiency & Performance Standards) governs every decision.
+  See [`REPS.md`](REPS.md).
+- **MSRV:** Rust 1.85.
 - **Edition:** 2024.
 - **Cross-platform:** Linux, macOS, Windows.
-- **No-std:** opt-out via `default-features = false` (where applicable).
 
 ---
 
@@ -115,7 +215,10 @@ at your option.
 
 ### Contribution
 
-Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in the work by you, as defined in the Apache-2.0 license, shall be dual licensed as above, without any additional terms or conditions.
+Unless you explicitly state otherwise, any contribution intentionally
+submitted for inclusion in the work by you, as defined in the Apache-2.0
+license, shall be dual licensed as above, without any additional terms or
+conditions.
 
 ---
 

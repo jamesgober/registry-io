@@ -1,32 +1,70 @@
-﻿//! # registry-io
+//! # registry-io
 //!
-//! HIGH-PERFORMANCE EVENT REGISTRY PRIMITIVE
+//! High-performance event and callback registry primitive for Rust.
 //!
-//! Sync-first event/callback registry with optional async support. Lock-free reads, zero-allocation hot path, sub-50ns notify target. Foundation primitive for portfolio crates needing fast in-process notification.
+//! `registry-io` provides a focused alternative to channel-based notification
+//! when several components need to react to the same in-process event with
+//! the lowest possible dispatch overhead. The hot path is **lock-free**,
+//! **allocation-free**, and **panic-isolating**.
 //!
 //! # Design philosophy
 //!
-//! $name is a focused primitive for fast in-process event notification. It is
-//! deliberately **NOT** a distributed messaging system, NOT a pub/sub broker, and
-//! NOT a replacement for channels when you need cross-thread async delivery with
-//! backpressure. It IS the right tool when you need:
+//! - **Sync-first.** The default registry runs handlers inline on the
+//!   calling thread, with sub-microsecond dispatch overhead.
+//! - **Lock-free reads.** Multiple threads can fire [`SyncRegistry::notify`]
+//!   concurrently without serialization.
+//! - **Zero allocation on the hot path.** `notify` walks an
+//!   [`arc_swap::ArcSwap`] snapshot of `Arc<dyn Fn>` pointers and dispatches
+//!   each one — no allocations along the no-panic path.
+//! - **Panic isolation.** A panic in one handler is caught and does **not**
+//!   stop sibling handlers or propagate to the caller.
+//! - **Priority ordering.** Handlers may be registered with a priority value;
+//!   higher priorities fire first, ties broken in registration order.
+//! - **RAII unregistration.** [`HandlerGuard`] cleans up automatically.
 //!
-//! - Multiple handlers responding to the same event
-//! - Sub-microsecond dispatch overhead
-//! - Lock-free reads under contention
-//! - Zero-allocation hot path
-//! - Optional async support without forcing async on sync users
+//! # Quick start
 //!
-//! # Status
+//! ```
+//! use std::sync::Arc;
+//! use std::sync::atomic::{AtomicU32, Ordering};
+//! use registry_io::SyncRegistry;
 //!
-//! Early scaffolding. Public API not yet defined. See [the repository](https://github.com/jamesgober/registry-io)
-//! and .dev/ROADMAP.md for the milestone plan.
+//! let registry: SyncRegistry<u32> = SyncRegistry::new();
+//! let counter = Arc::new(AtomicU32::new(0));
+//!
+//! let sink = Arc::clone(&counter);
+//! let id = registry.register(move |value| {
+//!     sink.fetch_add(*value, Ordering::Relaxed);
+//! });
+//!
+//! registry.notify(&5);
+//! registry.notify(&7);
+//! assert_eq!(counter.load(Ordering::Relaxed), 12);
+//!
+//! assert!(registry.unregister(id));
+//! ```
+//!
+//! # Feature flags
+//!
+//! - `std` (default) — enables the standard library. Required for sync and
+//!   async registries.
+//! - `sync` (default) — exposes [`SyncRegistry`]. Implies `std`.
+//! - `async` — reserved for a future release; exposes `AsyncRegistry` for
+//!   `async fn` handlers. Implies `std`.
+//! - `hybrid` — activates both `sync` and `async`.
+//!
+//! # Out of scope
+//!
+//! `registry-io` is a local, in-process primitive. It is **not** a pub/sub
+//! broker, **not** a message bus, and **not** a replacement for channels
+//! when you need cross-process or cross-network delivery with backpressure.
+//! See the project README for a list of when **not** to use it.
 //!
 //! # License
 //!
 //! Dual-licensed under Apache-2.0 OR MIT.
 
-#![doc(html_root_url = "https://docs.rs/registry-io")]
+#![doc(html_root_url = "https://docs.rs/registry-io/0.4.0")]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(not(feature = "std"), no_std)]
 #![deny(missing_docs)]
@@ -42,6 +80,31 @@
 #![deny(clippy::dbg_macro)]
 #![deny(clippy::undocumented_unsafe_blocks)]
 #![deny(clippy::missing_safety_doc)]
+#![warn(clippy::pedantic)]
+#![allow(clippy::module_name_repetitions)]
+
+extern crate alloc;
+
+#[cfg(feature = "std")]
+extern crate std;
+
+mod handler_id;
+
+#[cfg(feature = "sync")]
+mod panic;
+
+#[cfg(feature = "sync")]
+pub mod sync;
+
+pub use handler_id::HandlerId;
+
+#[cfg(feature = "sync")]
+#[cfg_attr(docsrs, doc(cfg(feature = "sync")))]
+pub use panic::PanicInfo;
+
+#[cfg(feature = "sync")]
+#[cfg_attr(docsrs, doc(cfg(feature = "sync")))]
+pub use sync::{HandlerGuard, SyncRegistry};
 
 /// Crate version string, populated by Cargo at build time.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

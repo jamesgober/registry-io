@@ -1,8 +1,8 @@
-﻿[package]
+[package]
 name = "registry-io"
-version = "0.1.0"
+version = "0.4.0"
 edition = "2024"
-rust-version = "1.75"
+rust-version = "1.85"
 readme = "README.md"
 license = "Apache-2.0 OR MIT"
 
@@ -42,19 +42,26 @@ path = "src/lib.rs"
 default = ["std", "sync"]
 
 # Core feature flags
-std = []                              # Standard library (default on)
-sync = []                             # Synchronous registry (default on)
-async = ["dep:futures-core"]          # Async-aware registry
-hybrid = ["sync", "async"]            # Hybrid sync + async registry
+# `std` pulls in the standard library; required for the sync and async registries.
+std = []
+# `sync` enables the SyncRegistry and all synchronous-side machinery (priority,
+# guards, panic isolation). Implies `std`.
+sync = ["std"]
+# `async` enables the AsyncRegistry. Reserved for a future release (>= 0.5.0).
+# Implies `std`.
+async = ["std", "dep:futures-core"]
+# `hybrid` activates both sync and async paths.
+hybrid = ["sync", "async"]
 
-# Optional integrations
-metrics = []                          # Built-in metrics on the registry itself
+# Optional integrations (placeholders, no code yet).
+metrics = []
 
 [dependencies]
-# Lock-free atomic snapshot updates
+# Lock-free atomic snapshot updates of the handler list.
 arc-swap = "1.7"
 
-# Optional - async support
+# Reserved for AsyncRegistry (>= 0.5.0). Pulled in only when the `async`
+# feature is enabled.
 futures-core = { version = "0.3", optional = true, default-features = false }
 
 [dev-dependencies]
@@ -62,7 +69,11 @@ criterion = { version = "0.5", features = ["html_reports"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
 
 [[bench]]
-name = "registry_bench"
+name = "sync_notify"
+harness = false
+
+[[bench]]
+name = "register_unregister"
 harness = false
 
 [profile.release]
