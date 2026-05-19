@@ -1,6 +1,6 @@
 # registry-io — API Reference
 
-This document describes every public item in `registry-io 0.5.0`, with
+This document describes every public item in `registry-io 0.8.0`, with
 parameter details, return values, and multiple code examples per use case.
 
 For internal architecture notes, see [ARCHITECTURE.md](./ARCHITECTURE.md) (when
@@ -43,8 +43,13 @@ present). For performance characteristics, see [PERFORMANCE.md](./PERFORMANCE.md
   - [`AsyncRegistry::register`](#asyncregistryregister)
   - [`AsyncRegistry::register_with_priority`](#asyncregistryregister_with_priority)
   - [`AsyncRegistry::register_guard` / `register_guard_with_priority`](#asyncregistryregister_guard--register_guard_with_priority)
-  - [`AsyncRegistry::unregister` / `clear` / `contains` / `handler_count` / `is_empty`](#asyncregistryunregister--clear--contains--handler_count--is_empty)
-  - [`AsyncRegistry::on_panic` / `clear_panic_callback`](#asyncregistryon_panic--clear_panic_callback)
+  - [`AsyncRegistry::unregister`](#asyncregistryunregister)
+  - [`AsyncRegistry::clear`](#asyncregistryclear)
+  - [`AsyncRegistry::contains`](#asyncregistrycontains)
+  - [`AsyncRegistry::handler_count`](#asyncregistryhandler_count)
+  - [`AsyncRegistry::is_empty`](#asyncregistryis_empty)
+  - [`AsyncRegistry::on_panic`](#asyncregistryon_panic)
+  - [`AsyncRegistry::clear_panic_callback`](#asyncregistryclear_panic_callback)
   - [`AsyncRegistry::notify` — concurrent dispatch](#asyncregistrynotify--concurrent-dispatch)
   - [`AsyncRegistry::notify_sequential` — sequential dispatch](#asyncregistrynotify_sequential--sequential-dispatch)
 - [Type: `AsyncHandlerGuard<E>` *(feature: `async`)*](#type-asynchandlerguarde-feature-async)
@@ -904,16 +909,163 @@ assert_eq!(registry.handler_count(), 0);
 # }
 ```
 
-### `AsyncRegistry::unregister` / `clear` / `contains` / `handler_count` / `is_empty`
+### `AsyncRegistry::unregister`
 
-Identical signatures and semantics to the sync side. See the
-`SyncRegistry` section above.
+```rust
+pub fn unregister(&self, id: HandlerId) -> bool;
+```
 
-### `AsyncRegistry::on_panic` / `clear_panic_callback`
+Remove the async handler identified by `id`. Identical semantics to
+[`SyncRegistry::unregister`].
 
-Same `PanicInfo` callback as on the sync side; fires once per panicking
-handler during a `notify*` call. Second-order panics inside the callback are
-caught and discarded.
+**Parameters:**
+- `id: HandlerId` — id returned from a previous `register*` call on this
+  registry.
+
+**Returns:** `true` if a handler was found and removed, `false` otherwise.
+
+**Example — remove a registered handler:**
+
+```rust
+# #[cfg(feature = "async")] {
+use registry_io::r#async::AsyncRegistry;
+
+let registry: AsyncRegistry<()> = AsyncRegistry::new();
+let id = registry.register(|_| async move {});
+assert!(registry.unregister(id));
+assert!(!registry.unregister(id));
+# }
+```
+
+**Example — conditional removal based on age:**
+
+```rust
+# #[cfg(feature = "async")] async fn _doc() {
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use registry_io::r#async::AsyncRegistry;
+
+let registry: AsyncRegistry<u32> = AsyncRegistry::new();
+let count = Arc::new(AtomicUsize::new(0));
+let sink = Arc::clone(&count);
+let id = registry.register(move |_| {
+    let sink = Arc::clone(&sink);
+    async move {
+        let _ = sink.fetch_add(1, Ordering::Relaxed);
+    }
+});
+
+for _ in 0..3 { registry.notify(&1).await; }
+if count.load(Ordering::Relaxed) >= 3 {
+    let _ = registry.unregister(id);
+}
+# }
+```
+
+### `AsyncRegistry::clear`
+
+```rust
+pub fn clear(&self);
+```
+
+Remove every registered async handler. In-flight `notify*` calls that
+already loaded their snapshot before `clear` finishes still run their
+snapshot to completion.
+
+**Example — reset between phases:**
+
+```rust
+# #[cfg(feature = "async")] {
+use registry_io::r#async::AsyncRegistry;
+
+let registry: AsyncRegistry<()> = AsyncRegistry::new();
+for _ in 0..10 {
+    let _ = registry.register(|_| async move {});
+}
+registry.clear();
+assert_eq!(registry.handler_count(), 0);
+# }
+```
+
+### `AsyncRegistry::contains`
+
+```rust
+pub fn contains(&self, id: HandlerId) -> bool;
+```
+
+Returns `true` if a handler with `id` is currently registered.
+
+**Example:**
+
+```rust
+# #[cfg(feature = "async")] {
+use registry_io::r#async::AsyncRegistry;
+
+let registry: AsyncRegistry<()> = AsyncRegistry::new();
+let id = registry.register(|_| async move {});
+assert!(registry.contains(id));
+assert!(registry.unregister(id));
+assert!(!registry.contains(id));
+# }
+```
+
+### `AsyncRegistry::handler_count`
+
+```rust
+pub fn handler_count(&self) -> usize;
+```
+
+Snapshot the current async handler count. `O(1)`.
+
+```rust
+# #[cfg(feature = "async")] {
+use registry_io::r#async::AsyncRegistry;
+
+let registry: AsyncRegistry<()> = AsyncRegistry::new();
+assert_eq!(registry.handler_count(), 0);
+let _ = registry.register(|_| async move {});
+let _ = registry.register(|_| async move {});
+assert_eq!(registry.handler_count(), 2);
+# }
+```
+
+### `AsyncRegistry::is_empty`
+
+```rust
+pub fn is_empty(&self) -> bool;
+```
+
+Equivalent to `self.handler_count() == 0`.
+
+```rust
+# #[cfg(feature = "async")] {
+use registry_io::r#async::AsyncRegistry;
+
+let registry: AsyncRegistry<()> = AsyncRegistry::new();
+assert!(registry.is_empty());
+let _ = registry.register(|_| async move {});
+assert!(!registry.is_empty());
+# }
+```
+
+### `AsyncRegistry::on_panic`
+
+```rust
+pub fn on_panic<F>(&self, callback: F)
+where
+    F: Fn(&PanicInfo<'_>) + Send + Sync + 'static;
+```
+
+Install a callback invoked when an async handler's future panics during
+`notify` or `notify_sequential`. Replaces any previous callback. Second-
+order panics inside the callback itself are caught and discarded.
+
+**Parameters:**
+- `callback: F` — closure receiving a [`PanicInfo`] reference per
+  panicking handler. Runs on whichever thread the runtime polled the
+  failing future on.
+
+**Example — counting panics:**
 
 ```rust
 # #[cfg(feature = "async")] async fn _doc() {
@@ -932,6 +1084,42 @@ let _ = registry.register(|_| async move { panic!("oops") });
 let _ = registry.register(|_| async move {});
 registry.notify(&()).await;
 assert_eq!(count.load(Ordering::Relaxed), 1);
+# }
+```
+
+**Example — log via existing logger:**
+
+```rust
+# #[cfg(feature = "async")] {
+use registry_io::r#async::AsyncRegistry;
+
+let registry: AsyncRegistry<()> = AsyncRegistry::new();
+registry.on_panic(|info| {
+    eprintln!(
+        "async handler {} panicked: {}",
+        info.handler_id(),
+        info.message().unwrap_or("<opaque>")
+    );
+});
+# }
+```
+
+### `AsyncRegistry::clear_panic_callback`
+
+```rust
+pub fn clear_panic_callback(&self);
+```
+
+Remove any previously installed panic callback. Subsequent panics during
+`notify*` become silent again.
+
+```rust
+# #[cfg(feature = "async")] {
+use registry_io::r#async::AsyncRegistry;
+
+let registry: AsyncRegistry<()> = AsyncRegistry::new();
+registry.on_panic(|_| {});
+registry.clear_panic_callback();
 # }
 ```
 
@@ -1056,4 +1244,4 @@ All types upholding `Send + Sync` do so for any `E: Send + Sync + 'static`.
 
 ---
 
-<sub>registry-io v0.5.0 — Copyright © 2026 James Gober. Apache-2.0 OR MIT.</sub>
+<sub>registry-io v0.8.0 — Copyright © 2026 James Gober. Apache-2.0 OR MIT.</sub>

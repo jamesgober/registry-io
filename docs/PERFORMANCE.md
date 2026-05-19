@@ -1,6 +1,8 @@
 # registry-io — Performance
 
-Measured performance characteristics for `registry-io 0.6.0`, plus the
+Measured performance characteristics for `registry-io 0.8.0` (numbers
+captured during the 0.6.0 performance-verification milestone, valid for
+all subsequent releases unless `notify` is touched), plus the
 cost model, methodology, and reproducibility notes.
 
 The performance contract for `1.0.0` lives in `.dev/ROADMAP.md`. Every
@@ -300,4 +302,4 @@ For a faster (less precise) sweep, append
 
 ---
 
-<sub>registry-io v0.6.0 — Copyright © 2026 James Gober. Apache-2.0 OR MIT.</sub>
+<sub>registry-io v0.8.0 — Copyright © 2026 James Gober. Apache-2.0 OR MIT.</sub>

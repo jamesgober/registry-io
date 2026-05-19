@@ -113,7 +113,7 @@ Use `registry-io` when you have:
 
 ```toml
 [dependencies]
-registry-io = "0.7"
+registry-io = "0.8"
 ```
 
 ```rust
@@ -193,7 +193,7 @@ registry.notify(&()); // returns cleanly; both effects observed
 
 ```toml
 [dependencies]
-registry-io = { version = "0.7", features = ["async"] }
+registry-io = { version = "0.8", features = ["async"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 
@@ -254,8 +254,13 @@ for the full reference.
 ## Documentation
 
 - [`docs/API.md`](docs/API.md) — full API reference with examples per item.
+- [`docs/PATTERNS.md`](docs/PATTERNS.md) — four canonical integration
+  patterns (hot reload, audit fan-out, metric events, transaction
+  hooks), each with a runnable example.
 - [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) — cost model, benchmarks, and
   concurrency characteristics.
+- [`docs/SECURITY.md`](docs/SECURITY.md) — threat model, panic isolation
+  detail, fuzz methodology.
 - [`.dev/ROADMAP.md`](.dev/ROADMAP.md) — milestone plan to 1.0.
 - [`CHANGELOG.md`](CHANGELOG.md) — release history.
 

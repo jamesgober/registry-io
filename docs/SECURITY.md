@@ -1,6 +1,6 @@
 # registry-io — Security
 
-This document captures the security posture of `registry-io 0.7.0`: what
+This document captures the security posture of `registry-io 0.8.0`: what
 the crate promises, what it does not, and how that posture is verified.
 
 For performance characteristics see [`PERFORMANCE.md`](./PERFORMANCE.md). For
@@ -212,4 +212,4 @@ place.
 
 ---
 
-<sub>registry-io v0.7.0 — Copyright © 2026 James Gober. Apache-2.0 OR MIT.</sub>
+<sub>registry-io v0.8.0 — Copyright © 2026 James Gober. Apache-2.0 OR MIT.</sub>

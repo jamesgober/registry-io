@@ -19,6 +19,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.8.0] - 2026-05-19
+
+Integration-validation milestone. Four canonical integration patterns
+are now documented end-to-end (hot reload, audit fan-out, metric event
+collection, transaction state-change hooks), each backed by a runnable
+example. Documentation accuracy was swept across every `.md` file
+under the repository to bring stale version strings, copyright
+footers, and dependency snippets in line with the current release.
+
+### Added
+
+- **`docs/PATTERNS.md`** — integration-pattern reference covering the
+  four use cases the crate was built to serve. Each pattern names the
+  problem, sketches the solution shape, contrasts with the obvious
+  channel/mutex alternatives, and links to its runnable example.
+  Closes with a "choosing between sync and async" decision matrix and
+  a "mistakes to avoid" section.
+- **`examples/pattern_hot_reload.rs`** — config-lib-style hot reload.
+  A single `Config` value owns an `ArcSwap<Snapshot>` plus an
+  `Arc<SyncRegistry<Snapshot>>`; subscribers re-derive local state
+  from each new snapshot in ~10 ns per handler.
+- **`examples/pattern_audit_fanout.rs`** — three different sinks
+  (stdout, file-tee, critical-alert) attached via `register_guard`;
+  drop-the-sink-to-deregister semantics make detach trivial; panic
+  isolation between sinks comes for free.
+- **`examples/pattern_metric_event.rs`** — one lock-free atomic
+  aggregator + one batching exporter against a `SyncRegistry<MetricEvent>`.
+  Drives 1 000 simulated requests through 3 event kinds.
+- **`examples/pattern_transaction_hooks.rs`** — priority-ordered
+  transaction hooks (WAL flush → cache invalidate → replication ship →
+  metrics record) using `register_with_priority`.
+- **Expanded `docs/API.md`** — the previously-condensed async block
+  ("`unregister / clear / contains / handler_count / is_empty`",
+  "`on_panic / clear_panic_callback`") is now seven individual
+  sections, each with its own description, signature, parameters,
+  return value, and at least one runnable example. Matches the
+  per-method depth of the sync section. Brings the async surface to
+  parity with the directive: every public item has its own multi-
+  example section.
+
+### Changed
+
+- **All documentation footers and prose version refs** updated to
+  v0.8.0 in `docs/API.md`, `docs/PERFORMANCE.md`, `docs/SECURITY.md`,
+  and `docs/PATTERNS.md`. The README async-feature install snippet
+  bumped from `version = "0.7"` to `version = "0.8"`.
+- **`src/lib.rs`** — `#![doc(html_root_url)]` bumped from `0.5.0`
+  (which had been stale for three releases) to `0.8.0`. Going forward
+  this constant is part of the release checklist.
+- **`README.md`** — Documentation section now surfaces `PATTERNS.md`
+  and `SECURITY.md` alongside `API.md` and `PERFORMANCE.md`.
+
+### Fixed
+
+- **Stale doc versions.** v0.5.0 footers in `API.md`, v0.6.0 footers
+  in `PERFORMANCE.md`, v0.4.0 install snippet in older README copies,
+  and `html_root_url = "0.5.0"` in `src/lib.rs` had all drifted away
+  from the actual crate version. Every reference is now sync'd to
+  v0.8.0 in a single sweep; release checklist updated to make this
+  automatic next time.
+
+[Unreleased]: https://github.com/jamesgober/registry-io/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/jamesgober/registry-io/releases/tag/v0.8.0
+
+---
+
 ## [0.7.0] - 2026-05-19
 
 Hardening milestone. Property-based invariant testing,
