@@ -63,38 +63,33 @@
 
 ## Status
 
-**Active development — release-candidate gate.** v0.9.0 is the final
-pre-1.0 documentation pass: a v1.0 stability contract
-([STABILITY-1.0.md](docs/STABILITY-1.0.md)), internal architecture
-walk-through ([ARCHITECTURE.md](docs/ARCHITECTURE.md)), and
-per-platform behavior notes ([PLATFORM-NOTES.md](docs/PLATFORM-NOTES.md))
-all land in this release. The next release will be `1.0.0-rc.1`.
+**Stable. Production-ready.** `registry-io 1.0.0` is the first
+stable release. The public API is **frozen** per the contract in
+[`docs/STABILITY-1.0.md`](docs/STABILITY-1.0.md); breaking changes
+require a major-version bump. Performance, panic-isolation, and
+zero-allocation guarantees are measured and locked in.
 
-v0.8.0 added the integration-pattern reference
-([PATTERNS.md](docs/PATTERNS.md)) with four canonical patterns plus
-runnable examples for each.
+Headline numbers (full table in
+[`docs/PERFORMANCE.md`](docs/PERFORMANCE.md)):
 
-v0.7.0 was the hardening milestone:
-property-based invariant tests via `proptest`, an `Arc::strong_count`
-leak canary over 10 000 register/unregister cycles, a `cargo-fuzz`
-target scaffold, and a published [threat model](docs/SECURITY.md). The
-public API contains zero `unsafe` code.
+- Sync `notify`, 1 handler, 1 thread — **10.1 ns**
+- Sync `notify`, 4 handlers, 16 threads contended — **24.7 ns**
+- Async `notify` concurrent, 1 handler — **177 ns**
+- Async `notify_sequential`, 1 handler — **53 ns**
+- Sync `notify` hot path heap allocations — **0** (verified by `dhat`)
 
-v0.6.0 shipped the performance verification: every target in the
-Performance Contract is met with significant headroom — sync `notify`
-at **~10 ns / 1 handler / 1 thread**, **~25 ns / 4 handlers / 16
-threads** contended, and `dhat`-verified **zero heap allocations** on
-the hot path. Async concurrent dispatch is **~180 ns / 1 handler**. See
-[`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) for the full measurements.
+Guarantees:
 
-v0.5.0 added `AsyncRegistry` with concurrent + sequential dispatch,
-`AsyncHandlerGuard`, and panic isolation across `.await`, behind the
-`async` feature. The synchronous side (v0.4.0) — `SyncRegistry`, priority
-ordering, RAII guards, panic isolation — remains the default. See
-[`.dev/ROADMAP.md`](.dev/ROADMAP.md) for the path to 1.0.
-
-Public API is **not** yet frozen — minor releases may break it. Pin specific
-versions; expect changes pre-1.0.
+- **Zero `unsafe` in the public API.**
+- **Lock-free reads** via `ArcSwap` snapshots.
+- **Zero allocation** on the sync notify no-panic path.
+- **Panic isolation** — one panicking handler does not stop siblings
+  or propagate to the caller.
+- **Priority-ordered dispatch** with stable ties.
+- **RAII unregistration** via `HandlerGuard` / `AsyncHandlerGuard`.
+- **`Send + Sync`** on every public type.
+- **Cross-platform** — Linux, macOS, Windows on stable + MSRV
+  1.85.0.
 
 ---
 
@@ -124,7 +119,7 @@ Use `registry-io` when you have:
 
 ```toml
 [dependencies]
-registry-io = "0.9"
+registry-io = "1.0"
 ```
 
 ```rust
@@ -204,7 +199,7 @@ registry.notify(&()); // returns cleanly; both effects observed
 
 ```toml
 [dependencies]
-registry-io = { version = "0.9", features = ["async"] }
+registry-io = { version = "1.0", features = ["async"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 

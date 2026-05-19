@@ -457,4 +457,4 @@ When adding to `registry-io`, the in-tree convention is:
 
 ---
 
-<sub>registry-io v0.9.0 — Copyright © 2026 James Gober. Apache-2.0 OR MIT.</sub>
+<sub>registry-io v1.0.0 — Copyright © 2026 James Gober. Apache-2.0 OR MIT.</sub>

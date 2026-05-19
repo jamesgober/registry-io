@@ -1,6 +1,6 @@
 # registry-io — API Reference
 
-This document describes every public item in `registry-io 0.9.0`, with
+This document describes every public item in `registry-io 1.0.0`, with
 parameter details, return values, and multiple code examples per use case.
 
 For internal architecture notes, see [ARCHITECTURE.md](./ARCHITECTURE.md) (when
@@ -1244,4 +1244,4 @@ All types upholding `Send + Sync` do so for any `E: Send + Sync + 'static`.
 
 ---
 
-<sub>registry-io v0.9.0 — Copyright © 2026 James Gober. Apache-2.0 OR MIT.</sub>
+<sub>registry-io v1.0.0 — Copyright © 2026 James Gober. Apache-2.0 OR MIT.</sub>

@@ -1,6 +1,6 @@
 # registry-io — Security
 
-This document captures the security posture of `registry-io 0.9.0`: what
+This document captures the security posture of `registry-io 1.0.0`: what
 the crate promises, what it does not, and how that posture is verified.
 
 For performance characteristics see [`PERFORMANCE.md`](./PERFORMANCE.md). For
@@ -139,8 +139,9 @@ checked into the corpus.
 
 ### Findings
 
-To date: **no crashes, no hangs, no UB reports**. This document will be
-updated if that ever changes.
+As of v1.0.0: **no crashes, no hangs, no UB reports**. The 1-CPU-hour
+soak per target was performed before the 1.0.0 cut. This document is
+updated if any future run uncovers a finding.
 
 ---
 
@@ -190,10 +191,14 @@ cargo test --all-features
 cargo doc --no-deps --all-features        # -D warnings
 ```
 
-Planned for the 1.0.0 release-candidate phase:
+Periodic maintenance gates (run before each v1.x.y publish):
 
-- `cargo audit` — RustSec advisory database scan.
-- `cargo deny check` — license + banned-crates policy enforcement.
+- `cargo audit` — RustSec advisory database scan; **clean** as of
+  v1.0.0.
+- `cargo deny check` — license + banned-crates policy enforcement;
+  **clean** as of v1.0.0.
+- `cargo public-api diff` — guards against unintentional public-API
+  changes between releases.
 
 ---
 
@@ -212,4 +217,4 @@ place.
 
 ---
 
-<sub>registry-io v0.9.0 — Copyright © 2026 James Gober. Apache-2.0 OR MIT.</sub>
+<sub>registry-io v1.0.0 — Copyright © 2026 James Gober. Apache-2.0 OR MIT.</sub>

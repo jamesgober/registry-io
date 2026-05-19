@@ -19,6 +19,132 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.0.0] - 2026-05-19
+
+**First stable release.** The public API is now frozen for the
+lifetime of v1.x under the contract in
+[`docs/STABILITY-1.0.md`](docs/STABILITY-1.0.md). Every behavioral
+guarantee, performance target, and panic-isolation rule documented
+across the 0.x line is locked in here.
+
+No new public API in this release. v1.0.0 promotes the API surface
+finalized in v0.9.0 to a stable contract; no compile-time or
+behavioral change is required to upgrade from v0.9.0 to v1.0.0.
+
+### What's locked in by v1.0.0
+
+#### Public types
+
+- `HandlerId` — opaque, `Copy + Eq + Hash + Debug + Display`,
+  `as_u64()` diagnostic accessor.
+- `PanicInfo<'a>` — `handler_id()`, `payload()`, `message()`, `Debug`.
+- `SyncRegistry<E>` — full sync surface: `new`, `with_capacity`,
+  `register`, `register_with_priority`, `register_guard`,
+  `register_guard_with_priority`, `unregister`, `clear`, `contains`,
+  `handler_count`, `is_empty`, `on_panic`, `clear_panic_callback`,
+  `notify`. Plus `Default + Debug + Send + Sync`.
+- `HandlerGuard<E>` — `#[must_use]`, `id()`, `forget()`, Drop
+  semantics specified.
+- `AsyncRegistry<E>` *(feat: async)* — full async surface mirroring
+  the sync side, plus `notify` (concurrent) and `notify_sequential`.
+- `AsyncHandlerGuard<E>` *(feat: async)* — same shape as
+  `HandlerGuard`.
+- `pub const VERSION` — crate version string.
+- `pub mod sync`, `pub mod r#async` *(feat: async)*.
+
+#### Behavioral contract
+
+- **Lock-free + zero-allocation** sync notify hot path. Verified
+  by `tests/zero_alloc.rs` (`dhat`-backed, 100 000 calls).
+- **Panic isolation** via `std::panic::catch_unwind` for both sync
+  and async dispatch. Sibling handlers continue; `notify` does not
+  unwind into the caller.
+- **Priority ordering**: higher fires first; equal priority fires
+  in registration order (stable).
+- **`HandlerId` uniqueness** within a registry for that registry's
+  lifetime. Ids are not comparable across registries.
+- **`Send + Sync`** on every public type for any
+  `E: Send + Sync + 'static`.
+- **RAII unregistration**: drop the guard, the registration drops.
+  Registry-before-guard drop is safe.
+
+#### Performance contract (measured headroom)
+
+| Operation                                       | Target     | Measured  |
+|-------------------------------------------------|-----------:|----------:|
+| Sync notify, 1 handler, 1 thread                | `<20 ns`   | 10.1 ns   |
+| Sync notify, 4 handlers, 1 thread               | `<50 ns`   | 12.5 ns   |
+| Sync notify, 16 handlers, 1 thread              | `<200 ns`  | 26.0 ns   |
+| Sync notify, 4 handlers, 16 threads contended   | `<50 ns`   | 24.7 ns   |
+| Async notify (concurrent), 1 handler            | `<500 ns`  | 177 ns    |
+| Zero heap allocations on sync notify no-panic   | required   | verified  |
+
+Full numbers and reproduction in
+[`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).
+
+#### Cargo metadata
+
+- **Edition** `2024`
+- **MSRV** `1.85` (frozen for v1.x)
+- **License** `Apache-2.0 OR MIT`
+- **Features** `std`, `sync`, `async`, `hybrid`, `metrics` (reserved),
+  `dhat-heap` (dev-only). All additive.
+
+### Added in 1.0.0 specifically
+
+- **`[1.0.0]`** stability block in [`docs/STABILITY-1.0.md`](docs/STABILITY-1.0.md)
+  now reads as "in effect" rather than "planned" — every clause is
+  binding from this release forward.
+- **`docs/SECURITY.md`** updated to record the 1-CPU-hour fuzz
+  soak result (clean, no findings) and to list the maintenance
+  gates (`cargo audit`, `cargo deny check`, `cargo public-api diff`)
+  with their v1.0.0 status (all clean).
+
+### Changed
+
+- **Version refs swept** across the entire codebase from `0.9.0` to
+  `1.0.0`: `Cargo.toml`, `src/lib.rs#html_root_url`, `README.md`
+  install snippets (both sync and async blocks), all
+  `docs/*.md` headers and footers.
+- **`README.md` Status section** rewritten: "Active development" /
+  "API not yet frozen" language removed. Now leads with
+  "Stable. Production-ready." plus the measured headline numbers
+  and the locked-in guarantees.
+- **`docs/STABILITY-1.0.md`** language tightened: future-tense
+  hedges ("will not change", "planned for the RC") replaced with
+  present-tense statements of the in-effect contract.
+
+### Verified (v1.0.0 release gates)
+
+```
+cargo fmt --all -- --check                                OK
+cargo clippy --all-targets --all-features -- -D warnings  OK
+cargo test --all-features                                 OK (149 tests)
+cargo test --features dhat-heap --test zero_alloc         OK
+cargo build --all-features --examples                     OK
+RUSTFLAGS="-D warnings" cargo build --all-features --examples  OK
+cargo doc --no-deps --all-features                        OK (-D warnings)
+```
+
+Cross-platform CI (Linux/macOS/Windows × stable + MSRV 1.85.0)
+passes the same gate. Public-API diff vs v0.9.0: empty (no surface
+change; v1.0.0 is a stability promotion of v0.9.0's API).
+
+### Skipped
+
+- A `1.0.0-rc.1` release candidate. The full 0.x line was effectively
+  the RC track: nine published `0.x.0` releases with cumulative
+  hardening (proptest, fuzz, leak checks, dhat-verified zero-alloc),
+  performance verification against the contract, full documentation
+  pass, and four runnable integration-pattern examples. There is
+  nothing for an RC soak to discover that the 0.x line did not
+  already shake out.
+
+[Unreleased]: https://github.com/jamesgober/registry-io/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/jamesgober/registry-io/releases/tag/v1.0.0
+
+---
+
 ## [0.9.0] - 2026-05-19
 
 Documentation pass. Three new long-form docs land in this release —

@@ -1,11 +1,11 @@
 # registry-io — v1.0 Stability Contract
 
-This document is the contract `registry-io 1.0.0` commits to. It enumerates
-**exactly** what is frozen, **exactly** what may still change, and the
-mechanics by which any of that changes again.
+This document **is** the contract that `registry-io 1.0.0` ships under.
+It enumerates **exactly** what is frozen, **exactly** what may still
+change, and the mechanics by which any of that changes again.
 
-> Status: this document is **binding**. Anything in here that we later need
-> to break requires a **MAJOR** version increment (2.0.0).
+> Status: **in effect** as of v1.0.0. Anything in here that later needs
+> to be broken requires a **MAJOR** version increment (2.0.0).
 
 For the milestone plan see [`.dev/ROADMAP.md`](../.dev/ROADMAP.md). For the
 performance guarantees that back the API see [`PERFORMANCE.md`](./PERFORMANCE.md).
@@ -16,9 +16,10 @@ performance guarantees that back the API see [`PERFORMANCE.md`](./PERFORMANCE.md
 
 ### Public API surface
 
-The following items are **frozen** for the lifetime of v1.x. Their
-*signatures*, *semantics*, and *thread-safety* will not change in a
-backwards-incompatible way without a v2.0.0 release.
+The following items are **frozen** for the lifetime of v1.x as of
+v1.0.0. Their *signatures*, *semantics*, and *thread-safety* do not
+change in a backwards-incompatible way within v1.x; any such change
+ships as v2.0.0.
 
 | Item                              | Kind   | Notes                                |
 |-----------------------------------|--------|--------------------------------------|
@@ -88,8 +89,9 @@ backwards-incompatible way without a v2.0.0 release.
 - `AsyncRegistry<E>: Send + Sync + Debug + Default`
 - `AsyncHandlerGuard<E>: Send + Sync + Debug`
 
-We will **not** add a `Default` impl to a type that doesn't have one in
-1.0 — that would be a behavior addition users could begin to depend on.
+A `Default` impl is **not** added to a type that doesn't already
+have one in 1.0 — that would be a behavior addition users could begin
+to depend on, and removing it later would break.
 
 ### Cargo metadata
 
@@ -115,18 +117,18 @@ disable an item exposed by another feature.
 
 ### Performance contract
 
-The numbers in [`PERFORMANCE.md`](./PERFORMANCE.md) define the *lower
-bound* on dispatch performance. v1.x will not regress any of:
+The numbers in [`PERFORMANCE.md`](./PERFORMANCE.md) define the *upper
+bound* on dispatch latency. v1.x does **not** regress past any of:
 
-- Sync notify, 1 handler, 1 thread: `<20 ns`
-- Sync notify, 16 handlers, 1 thread: `<200 ns`
-- Sync notify, 4 handlers, 16 threads contended: `<50 ns`
-- Async notify (concurrent), 1 handler: `<500 ns`
-- Zero heap allocations on the sync notify no-panic path
+- Sync notify, 1 handler, 1 thread — `<20 ns` (measured: 10.1 ns)
+- Sync notify, 16 handlers, 1 thread — `<200 ns` (measured: 26.0 ns)
+- Sync notify, 4 handlers, 16 threads contended — `<50 ns` (measured: 24.7 ns)
+- Async notify (concurrent), 1 handler — `<500 ns` (measured: 177 ns)
+- **Zero heap allocations** on the sync notify no-panic path
+  (verified by `tests/zero_alloc.rs`)
 
-If any of these are knowingly broken by a change, the change cannot
-ship in a `1.x.y` patch and the breaking-change procedure must be
-followed.
+A change that knowingly regresses any of these does not ship in a
+`1.x.y` patch — it requires the breaking-change procedure (v2.0.0).
 
 ---
 
@@ -230,8 +232,8 @@ These are not v1.x features and are not on the v2.0 roadmap either.
 - **Benchmark suite** (`benches/`) — guards the performance contract.
   Pre-merge: any change touching `notify` must include a bench run; a
   regression `>5%` blocks the merge.
-- **`cargo public-api diff`** (planned for the 1.0 RC) — catches
-  accidental signature changes between releases.
+- **`cargo public-api diff`** — catches accidental signature changes
+  between releases. Run before each v1.x.y publish.
 
 ---
 
@@ -251,4 +253,4 @@ stable crate is higher than any single feature.
 
 ---
 
-<sub>registry-io v0.9.0 — Copyright © 2026 James Gober. Apache-2.0 OR MIT.</sub>
+<sub>registry-io v1.0.0 — Copyright © 2026 James Gober. Apache-2.0 OR MIT.</sub>

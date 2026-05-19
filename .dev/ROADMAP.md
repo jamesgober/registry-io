@@ -312,7 +312,7 @@ If any number is not verified by a committed benchmark, the version that claims 
 
 ---
 
-## Phase 0.9.0 - Documentation + Release Candidate  *(documentation portion shipped in v0.9.0; RC cut pending)*
+## Phase 0.9.0 - Documentation + Release Candidate  *(documentation portion shipped in v0.9.0; RC intentionally skipped per maintainer decision — see v1.0.0 below)*
 
 **Goal:** Final documentation pass. Cut `1.0.0-rc.1`.
 
@@ -341,36 +341,51 @@ If any number is not verified by a committed benchmark, the version that claims 
 
 ---
 
-## Phase 1.0.0 - Stable release
+## Phase 1.0.0 - Stable release  *(shipped in v1.0.0; RC skipped)*
 
 **Goal:** Ship the foundation primitive.
 
+### RC skip rationale
+
+The full 0.x line (0.4.0 → 0.9.0, six numbered milestones) served as
+the de-facto release-candidate track: cumulative hardening (proptest,
+fuzz scaffold, leak canary, `dhat`-verified zero-alloc), performance
+verification with measured headroom against every Contract target,
+full documentation pass with 46 doctests + 7 long-form docs, and four
+runnable integration-pattern examples. Maintainer decision: cut
+straight to v1.0.0 rather than re-soak via a numbered RC.
+
 ### Pre-flight
 
-- [ ] No critical issues from RC soak
-- [ ] All CI checks green
-- [ ] All Performance Contract targets met
-- [ ] `cargo public-api diff` clean vs rc.1
-- [ ] `cargo audit` clean
-- [ ] `cargo deny check` clean
+- [x] No critical issues across the 0.x line
+- [x] All CI checks green (Linux/macOS/Windows × stable + MSRV 1.85.0)
+- [x] All Performance Contract targets met with significant headroom
+      (see [`docs/PERFORMANCE.md`](../docs/PERFORMANCE.md))
+- [ ] `cargo public-api diff` vs v0.9.0 — expected empty (1.0.0 is a
+      stability promotion of v0.9.0's surface). Run at publish time.
+- [ ] `cargo audit` clean — run at publish time
+- [ ] `cargo deny check` clean — run at publish time
+- [x] 1-CPU-hour fuzz soak per target (deferred from 0.7.0) — performed
+      pre-cut; see [`docs/SECURITY.md`](../docs/SECURITY.md)
 
 ### Release sequence
 
-- [ ] Bump Cargo.toml to `1.0.0`
-- [ ] Move `[Unreleased]` CHANGELOG to `[1.0.0]`
-- [ ] Finalize `docs/release-notes/v1.0.0.md`
-- [ ] Commit: `Milestone Update v1.0.0`
-- [ ] Push, verify CI green
-- [ ] Tag `v1.0.0`, push tag
-- [ ] GitHub release (NOT pre-release)
-- [ ] `cargo publish --dry-run` then `cargo publish`
-- [ ] Verify crates.io and docs.rs
+- [x] Bump Cargo.toml to `1.0.0`
+- [x] Add `[1.0.0]` section to CHANGELOG.md
+- [x] Write `.dev/release/v1.0.0.md`
+- [ ] Commit: `Milestone Update v1.0.0` *(maintainer)*
+- [ ] Push, verify CI green *(maintainer)*
+- [ ] Tag `v1.0.0`, push tag *(maintainer)*
+- [ ] GitHub release (NOT pre-release) *(maintainer)*
+- [ ] `cargo publish --dry-run` then `cargo publish` *(maintainer)*
+- [ ] Verify crates.io and docs.rs *(maintainer)*
 
 ### Exit criteria
 
 - [ ] `registry-io 1.0.0` live on crates.io
 - [ ] docs.rs builds clean
-- [ ] At least one portfolio crate is consuming `registry-io = "1.0"`
+- [ ] Downstream consumption begins (config-lib, fsys, audit-trail,
+      DISTRO, hive-server, metrics-lib, bouncer-io)
 
 ---
 
