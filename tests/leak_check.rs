@@ -29,7 +29,7 @@ use registry_io::SyncRegistry;
 #[test]
 fn register_unregister_churn_does_not_leak_handler_closures() {
     let registry: SyncRegistry<()> = SyncRegistry::new();
-    let canary: Arc<u64> = Arc::new(0xDEAD_BEEF);
+    let canary: Arc<u64> = Arc::new(0xdead_beef);
     assert_eq!(Arc::strong_count(&canary), 1, "baseline canary count");
 
     const ITERATIONS: usize = 10_000;
