@@ -192,6 +192,6 @@ mod tests {
     async fn join_all_with_zero_futures_is_immediately_ready() {
         let futures: Vec<core::future::Ready<()>> = Vec::new();
         let results = JoinAll::new(futures).await;
-        assert!(results.is_empty());
+        assert_eq!(results, [] as [(); 0]);
     }
 }
