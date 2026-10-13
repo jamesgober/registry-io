@@ -1,6 +1,6 @@
 # registry-io — API Reference
 
-This document describes every public item in `registry-io 1.0.0`, with
+This document describes every public item in `registry-io 1.1.0`, with
 parameter details, return values, and multiple code examples per use case.
 
 For internal architecture notes, see [ARCHITECTURE.md](./ARCHITECTURE.md) (when
@@ -25,13 +25,17 @@ present). For performance characteristics, see [PERFORMANCE.md](./PERFORMANCE.md
   - [`SyncRegistry::register_with_priority`](#syncregistryregister_with_priority)
   - [`SyncRegistry::register_guard`](#syncregistryregister_guard)
   - [`SyncRegistry::register_guard_with_priority`](#syncregistryregister_guard_with_priority)
+  - [`SyncRegistry::register_once`](#syncregistryregister_once) *(since 1.1.0)*
   - [`SyncRegistry::unregister`](#syncregistryunregister)
+  - [`SyncRegistry::unregister_and_wait`](#syncregistryunregister_and_wait) *(since 1.1.0)*
   - [`SyncRegistry::clear`](#syncregistryclear)
+  - [`SyncRegistry::clear_and_wait`](#syncregistryclear_and_wait) *(since 1.1.0)*
   - [`SyncRegistry::contains`](#syncregistrycontains)
   - [`SyncRegistry::handler_count`](#syncregistryhandler_count)
   - [`SyncRegistry::is_empty`](#syncregistryis_empty)
   - [`SyncRegistry::on_panic`](#syncregistryon_panic)
   - [`SyncRegistry::clear_panic_callback`](#syncregistryclear_panic_callback)
+  - [`SyncRegistry::panic_count`](#syncregistrypanic_count) *(since 1.1.0)*
   - [`SyncRegistry::notify`](#syncregistrynotify)
 - [Type: `HandlerGuard<E>`](#type-handlerguarde)
   - [`HandlerGuard::id`](#handlerguardid)
@@ -234,7 +238,9 @@ pub struct SyncRegistry<E: Send + Sync + 'static> { /* opaque */ }
 ```
 
 The core synchronous registry. Stores handlers as `Arc<dyn Fn(&E) + Send + Sync + 'static>`
-and dispatches via a lock-free [`arc_swap::ArcSwap`] snapshot.
+in a list that `notify` borrows in place under a hazard-pointer announcement:
+no lock, no reference-count traffic, no allocation. Writers build a new list
+and swap it in; see [ARCHITECTURE.md](./ARCHITECTURE.md#storage-model).
 
 `E` is the event type. Handlers receive `&E` (a borrow) so events don't need to
 be `Clone`. The bound `E: Send + Sync + 'static` is required for the registry
@@ -467,6 +473,74 @@ let _audit_guard = registry.register_guard_with_priority(100, |evt| {
 registry.notify(&"login");
 ```
 
+### `SyncRegistry::register_once`
+
+*Since 1.1.0.*
+
+```rust
+pub fn register_once<F>(self: &Arc<Self>, handler: F) -> HandlerId
+where
+    F: FnOnce(&E) + Send + 'static;
+```
+
+Register a handler that runs at most once, then removes itself. The handler
+may be `FnOnce`, so it can move captured state out. If several threads call
+`notify` concurrently, exactly one of them runs it; the others skip it. It is
+unregistered right after it runs, and also when it panics, so
+[`contains`](#syncregistrycontains) reports it gone from then on. Registers
+at the default priority (`0`).
+
+The registry must be in an [`Arc`] so the handler can remove itself. The
+handler holds only a `Weak` reference, so it does not keep the registry
+alive.
+
+**Parameters:**
+- `handler: F` — a closure that receives `&E` on the first `notify` call that
+  reaches it. Must be `FnOnce + Send + 'static` (no `Sync` needed).
+
+**Returns:** the `HandlerId` of the one-shot registration. It can be passed to
+`unregister` to cancel the handler before it runs.
+
+**Example — run once, then gone:**
+
+```rust
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+use registry_io::SyncRegistry;
+
+let registry = Arc::new(SyncRegistry::<u32>::new());
+let seen = Arc::new(AtomicU32::new(0));
+let s = Arc::clone(&seen);
+let id = registry.register_once(move |n| {
+    s.fetch_add(*n, Ordering::SeqCst);
+});
+
+registry.notify(&5);
+registry.notify(&7);
+assert_eq!(seen.load(Ordering::SeqCst), 5);
+assert!(!registry.contains(id));
+```
+
+**Example — move state out of the closure:**
+
+```rust
+use std::sync::{Arc, mpsc};
+use registry_io::SyncRegistry;
+
+let registry = Arc::new(SyncRegistry::<String>::new());
+let (tx, rx) = mpsc::channel::<String>();
+
+// `tx` is moved into the handler and consumed by it.
+let _ = registry.register_once(move |msg| {
+    tx.send(msg.clone()).unwrap();
+    drop(tx);
+});
+
+registry.notify(&"ready".to_owned());
+assert_eq!(rx.recv().unwrap(), "ready");
+assert!(rx.recv().is_err()); // sender dropped after the single run
+```
+
 ### `SyncRegistry::unregister`
 
 ```rust
@@ -479,6 +553,13 @@ Remove the handler identified by `id`.
 - `id: HandlerId` — id returned from a previous `register*` call.
 
 **Returns:** `true` if a handler was found and removed, `false` otherwise.
+An unknown id swaps nothing and allocates nothing.
+
+`notify` calls that start after `unregister` returns do not run the handler.
+A `notify` already in progress on another thread may still be running it;
+use [`unregister_and_wait`](#syncregistryunregister_and_wait) when that
+matters. Calling `unregister` from inside a handler (including the handler
+being removed) is supported and does not block.
 
 **Example — remove a single handler:**
 
@@ -513,6 +594,86 @@ if count.load(Ordering::Relaxed) >= 5 {
 }
 ```
 
+### `SyncRegistry::unregister_and_wait`
+
+*Since 1.1.0.*
+
+```rust
+pub fn unregister_and_wait(&self, id: HandlerId) -> bool;
+```
+
+Unregister a handler and wait until it has stopped running on every other
+thread.
+
+[`unregister`](#syncregistryunregister) guarantees that `notify` calls
+*starting* after it returns will not run the handler, but a `notify` already
+in progress on another thread may still be running it. This method closes
+that window: when it returns `true`, the handler is not running anywhere
+except, possibly, further up the calling thread's own stack (when called from
+inside a handler, it does not wait for itself), and it will never run again.
+Use it before tearing down anything the handler touches.
+
+**Parameters:**
+- `id: HandlerId` — id returned from a previous `register*` call.
+
+**Returns:** `true` once the handler is removed and no other thread is running
+it; `false` immediately, without waiting, if no handler with `id` was
+registered.
+
+**Blocking:** blocks the calling thread until in-flight dispatches on other
+threads finish, so a handler that never returns makes this never return. It
+spins briefly, then yields, then sleeps in steps of up to one millisecond.
+Do not call it from async code; use `unregister` there. The wait is
+conservative: if other threads register or unregister while it waits, it may
+also wait for dispatches that started on those newer handler lists.
+
+**Example — close a resource only after the handler is done with it:**
+
+```rust
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use registry_io::SyncRegistry;
+
+let registry: SyncRegistry<()> = SyncRegistry::new();
+let resource_open = Arc::new(AtomicBool::new(true));
+let r = Arc::clone(&resource_open);
+let id = registry.register(move |_| assert!(r.load(Ordering::SeqCst)));
+
+assert!(registry.unregister_and_wait(id));
+// No thread can be inside the handler now; safe to close.
+resource_open.store(false, Ordering::SeqCst);
+registry.notify(&());
+```
+
+**Example — with another thread dispatching:**
+
+```rust
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use registry_io::SyncRegistry;
+
+let registry = Arc::new(SyncRegistry::<u64>::new());
+let alive = Arc::new(AtomicBool::new(true));
+let a = Arc::clone(&alive);
+let id = registry.register(move |_| assert!(a.load(Ordering::SeqCst)));
+
+let stop = Arc::new(AtomicBool::new(false));
+let notifier = {
+    let (registry, stop) = (Arc::clone(&registry), Arc::clone(&stop));
+    thread::spawn(move || {
+        while !stop.load(Ordering::Relaxed) {
+            registry.notify(&1);
+        }
+    })
+};
+
+assert!(registry.unregister_and_wait(id));
+alive.store(false, Ordering::SeqCst); // the handler can no longer observe this
+stop.store(true, Ordering::Relaxed);
+notifier.join().unwrap();
+```
+
 ### `SyncRegistry::clear`
 
 ```rust
@@ -534,6 +695,33 @@ for _ in 0..10 {
 }
 registry.clear();
 assert_eq!(registry.handler_count(), 0);
+```
+
+Clearing an already-empty registry swaps nothing and allocates nothing.
+
+### `SyncRegistry::clear_and_wait`
+
+*Since 1.1.0.*
+
+```rust
+pub fn clear_and_wait(&self);
+```
+
+Remove every handler and wait until none of them is still running on another
+thread. The [`clear`](#syncregistryclear) counterpart of
+[`unregister_and_wait`](#syncregistryunregister_and_wait), with the same
+guarantee and the same blocking behavior: do not call it from async code. On
+an empty registry it returns immediately.
+
+**Example:**
+
+```rust
+use registry_io::SyncRegistry;
+
+let registry: SyncRegistry<u8> = SyncRegistry::new();
+let _ = registry.register(|_| {});
+registry.clear_and_wait();
+assert!(registry.is_empty());
 ```
 
 ### `SyncRegistry::contains`
@@ -663,6 +851,48 @@ registry.on_panic(|_| {});
 registry.clear_panic_callback();
 ```
 
+### `SyncRegistry::panic_count`
+
+*Since 1.1.0.*
+
+```rust
+pub fn panic_count(&self) -> u64;
+```
+
+Number of handler panics caught by `notify` since the registry was created.
+Counted whether or not an [`on_panic`](#syncregistryon_panic) callback is
+installed, so it can back a health check or metric without one. Updated only
+on the (cold) panic path, so it costs nothing while handlers behave.
+
+**Returns:** the running total as a `u64`.
+
+**Example — count without a callback:**
+
+```rust
+use registry_io::SyncRegistry;
+
+std::panic::set_hook(Box::new(|_| {})); // keep the test output quiet
+let registry: SyncRegistry<()> = SyncRegistry::new();
+let _ = registry.register(|_| panic!("boom"));
+registry.notify(&());
+assert_eq!(registry.panic_count(), 1);
+```
+
+**Example — health check:**
+
+```rust
+use registry_io::SyncRegistry;
+
+fn healthy<E: Send + Sync + 'static>(registry: &SyncRegistry<E>, budget: u64) -> bool {
+    registry.panic_count() <= budget
+}
+
+let registry: SyncRegistry<u32> = SyncRegistry::new();
+let _ = registry.register(|_| {});
+registry.notify(&1);
+assert!(healthy(&registry, 0));
+```
+
 ### `SyncRegistry::notify`
 
 ```rust
@@ -677,7 +907,8 @@ registration order.
 Each handler invocation is wrapped in [`catch_unwind`] so that a panic in
 one handler does **not** propagate to siblings or to the caller. If an
 [`on_panic`](#syncregistryon_panic) callback is installed, it is invoked once
-per panicking handler.
+per panicking handler. Every caught panic also increments
+[`panic_count`](#syncregistrypanic_count).
 
 **Parameters:**
 - `event: &E` — borrowed event. Handlers receive the same reference.
@@ -792,13 +1023,17 @@ pub struct AsyncRegistry<E: Send + Sync + 'static> { /* opaque */ }
 ```
 
 The asynchronous counterpart to [`SyncRegistry`](#type-syncregistrye). Same
-lock-free [`arc_swap::ArcSwap`]-backed storage; handlers return a `'static`
-future that the registry drives via the crate-local [`JoinAll`] combinator
-(concurrent) or sequentially.
+lock-free, hazard-protected storage; handlers return a `'static` future that
+the registry polls in place, either concurrently or sequentially.
 
-Each handler future is wrapped in an internal `CatchUnwind` adapter so a
-panic during `poll` is isolated from sibling handlers and from the awaiting
-caller.
+Each handler call is isolated: a panic while the handler builds its future
+(the synchronous part of the closure) or while the future is polled is
+caught, does not affect sibling handlers or the awaiting caller, and is
+reported to `on_panic`. (Before 1.1.0 a panic while building the future
+escaped `notify`.)
+
+The four methods added to `SyncRegistry` in 1.1.0 (`unregister_and_wait`,
+`clear_and_wait`, `register_once`, `panic_count`) have no async counterpart.
 
 Path: `registry_io::r#async::AsyncRegistry` (re-exported at the crate root as
 `registry_io::AsyncRegistry` when the `async` feature is enabled).
@@ -1129,9 +1364,13 @@ registry.clear_panic_callback();
 pub async fn notify(&self, event: &E);
 ```
 
-Builds one future per handler and drives them concurrently via the
-crate-local `JoinAll`. Total wall-clock equals the **slowest** handler when
-each handler does real `.await` work.
+Builds one future per handler and polls them all in place until every one has
+finished. Total wall-clock equals the **slowest** handler when each handler
+does real `.await` work. Panics are reported to `on_panic` after all handlers
+have finished, in priority order.
+
+Allocations per call: one per handler (its boxed future) plus one for the
+join state when there is more than one handler; none for an empty registry.
 
 ```rust
 # #[cfg(feature = "async")] async fn _doc() {
@@ -1244,4 +1483,4 @@ All types upholding `Send + Sync` do so for any `E: Send + Sync + 'static`.
 
 ---
 
-<sub>registry-io v1.0.0 — Copyright © 2026 James Gober. Apache-2.0 OR MIT.</sub>
+<sub>registry-io v1.1.0 — Copyright © 2026 James Gober. Apache-2.0 OR MIT.</sub>

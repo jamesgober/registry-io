@@ -21,8 +21,8 @@ For the v1.0 stability contract see
 | macOS aarch64              | ✓           | ✓             |                                    |
 | Windows x86_64 (MSVC)      | ✓           | ✓             | dev-machine; SEH-based unwind      |
 | Windows x86_64 (GNU)       | not in CI   | not in CI     | should work; not gated             |
-| WASM (`wasm32-*`)          | **unsupported** | —          | `std::sync::Arc` semantics differ; `ArcSwap` not validated on wasm |
-| `no_std`                   | **unsupported** | —          | `arc-swap`, `std::panic`, `std::sync::Arc` all required |
+| WASM (`wasm32-*`)          | **unsupported** | —          | relies on thread-local storage, `std::panic` unwinding, and `std::sync`; not validated on wasm |
+| `no_std`                   | **unsupported** | —          | thread-local storage, `std::panic`, and `std::sync` (`Arc`, `Mutex`, `RwLock`) are all required |
 
 "Supported" means: every push to `main` runs `cargo fmt`, `cargo
 clippy --all-targets --all-features`, `cargo test --all-features`,
@@ -35,14 +35,18 @@ failure on any of those blocks the release.
 
 ### Linux
 
-The reference implementation. All published benchmark numbers are
-captured here.
+The reference implementation. The test suite passes here on stable
+and on Rust 1.85.0. The published 1.1.0 benchmark numbers were
+captured on the Windows dev machine (see below).
 
 - **`catch_unwind` cost on the no-panic path**: essentially free
   (gcc-style unwind tables; runtime cost is a `mov` to a TLS slot).
-- **`ArcSwap::load` cost**: ~2 ns, dominated by the thread-local
-  cache hit path inside `arc-swap`.
-- **`AtomicU64` access**: lock-free on every supported Linux target.
+- **Read-side protection cost**: one thread-local lookup, one `SeqCst`
+  store, one `SeqCst` load, and one release store per `notify`. On
+  x86_64 the `SeqCst` store compiles to a locked instruction (`xchg`);
+  on aarch64 to `stlr`, with `ldar` for the validating load.
+- **`AtomicU64` / `AtomicPtr` access**: lock-free on every supported
+  Linux target.
 
 Nothing in the crate uses `epoll`, `io_uring`, or any other
 Linux-specific facility. Everything is `std`.
@@ -64,8 +68,8 @@ here.
 
 - **`catch_unwind` cost on the no-panic path**: slightly higher than
   Linux because Windows uses SEH (structured exception handling).
-  Measured median sync-notify-1-handler-1-thread is **10.1 ns** on
-  the dev machine — already well under the `<20 ns` contract.
+  Measured median sync-notify-1-handler-1-thread is **6.4 ns** on
+  the dev machine in 1.1.0 — well under the `<20 ns` contract.
 - **Long path names**: avoid checking out the repo to a path
   approaching the legacy Windows 260-character limit. Cargo's
   `target/` directory is deep and can hit the limit. If the
@@ -92,8 +96,10 @@ the suggested next step is contributing a matrix entry to
 - **Rust toolchain**: stable 1.85.0 or newer.
 - **`cargo`** (bundled with rustup).
 
-That's it for using the crate. No external native dependencies
-(arc-swap is pure Rust; tokio is dev-only).
+That's it for using the crate. With default features it has no
+runtime dependencies at all; the `async` feature adds the pure-Rust
+`futures-core`. `tokio` and the other dev-dependencies are only used
+by tests, examples, and benchmarks.
 
 ### Linux / macOS extras (development)
 
@@ -132,8 +138,13 @@ Six job lanes per push. Each lane runs:
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
+cargo clippy --all-targets --no-default-features --features sync -- -D warnings
+cargo clippy --all-targets --no-default-features --features async -- -D warnings
 cargo doc --no-deps --all-features        # with RUSTDOCFLAGS=-D warnings
 ```
+
+The two feature-subset clippy runs (added in 1.1.0) catch tests or
+examples that use one registry without declaring its feature.
 
 `actions/cache@v5` is used for the `~/.cargo/{registry,git}` and
 `target/` directories — this is the Node.js-24-native release of the
@@ -180,6 +191,18 @@ allocator (`jemalloc`, `mimalloc`, ...) in your application, all
 registry operations work identically; the zero-allocation guarantee
 on `notify` is independent of allocator choice.
 
+### Thread-local storage
+
+Each thread that calls `notify` (or any other read method) claims one
+128-byte hazard record through a thread-local on first use and
+releases it when the thread exits; the next new thread reuses it.
+Records are never freed, so their number is bounded by the peak
+number of threads dispatching at the same time. A `notify` issued from
+another thread-local's destructor, after this crate's thread-local has
+already been torn down, still works: it takes the slower locked
+fallback path. Thread-local destruction order differs between
+platforms, so this path exists on all of them.
+
 ### Threads and stack size
 
 The crate spawns no threads of its own. Worker threads in tests/benches
@@ -206,4 +229,4 @@ process if the divergence is security-relevant.
 
 ---
 
-<sub>registry-io v1.0.0 — Copyright © 2026 James Gober. Apache-2.0 OR MIT.</sub>
+<sub>registry-io v1.1.0 — Copyright © 2026 James Gober. Apache-2.0 OR MIT.</sub>

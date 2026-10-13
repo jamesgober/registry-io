@@ -16,37 +16,58 @@ measured costs, see [`PERFORMANCE.md`](./PERFORMANCE.md).
 ```
 ┌─────────────────────────── SyncRegistry<E> ─────────────────────────┐
 │                                                                     │
-│  ArcSwap<Vec<HandlerEntry<E>>>     ◄─── lock-free snapshot read     │
-│  ┌──────────────────────────┐                                       │
-│  │ HandlerEntry { id, prio, │                                       │
-│  │   handler: Arc<dyn Fn> } │   ◄─── one entry per registered       │
-│  │ HandlerEntry { … }       │       handler, priority-sorted        │
-│  │ HandlerEntry { … }       │                                       │
-│  └──────────────────────────┘                                       │
+│  handlers: SnapCell<Vec<HandlerEntry<E>>>                           │
+│  ┌───────────────────────────────────────────────────────────────┐  │
+│  │ current: AtomicPtr ──────► Arc<Vec<HandlerEntry<E>>>          │  │
+│  │                            ┌──────────────────────────┐       │  │
+│  │                            │ HandlerEntry { id, prio, │       │  │
+│  │                            │   handler: Arc<dyn Fn> } │       │  │
+│  │                            │ HandlerEntry { … }       │       │  │
+│  │                            └──────────────────────────┘       │  │
+│  │ retired_len: AtomicUsize       ◄─── readers check, rarely > 0 │  │
+│  │ fallback_readers: AtomicUsize  ◄─── readers without a slot    │  │
+│  │ writer: Mutex<Vec<Arc<..>>>    ◄─── writers only; retired     │  │
+│  │                                     lists awaiting free       │  │
+│  └───────────────────────────────────────────────────────────────┘  │
 │                                                                     │
-│  HandlerIdGenerator { next: AtomicU64 }   ◄─── monotonic id counter │
-│  ArcSwapOption<PanicCallbackHolder>       ◄─── optional on_panic    │
+│  id_generator: HandlerIdGenerator { next: AtomicU64 }               │
+│  panic_callback: RwLock<Option<Arc<PanicCallbackHolder>>>           │
+│  panics: AtomicU64                          ◄─── panic_count()      │
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
 
+┌──────────────── hazard domain (process-wide, src/hazard.rs) ────────┐
+│                                                                     │
+│  HEAD ──► Record ──► Record ──► Record ──► null   (append-only)     │
+│           slots[8]   slots[8]   slots[8]          one per thread,   │
+│           in_use     in_use     in_use            128-byte aligned, │
+│                                                   reused on exit    │
+└─────────────────────────────────────────────────────────────────────┘
+
   notify(&event):
-    1. snapshot = handlers.load()      // atomic acquire load
-    2. for entry in snapshot.iter() {
+    1. p = current.load()
+    2. announce p in this thread's next free slot     // SeqCst store
+    3. if current.load() != p, re-announce and retry   // SeqCst load
+    4. for entry in *p {
          catch_unwind(|| handler(event))
          if Err(payload) { handle_panic(id, payload) }
        }
+    5. clear the slot                                  // release store
+    6. if retired_len != 0 { try_lock and free unannounced lists }
 
   register(F):
     1. id = next id
-    2. handlers.rcu(|current| {
-         clone → insert at priority position → return new Arc<Vec>
-       })
+    2. lock writer mutex
+    3. build new Vec (insert at priority position), store as current
+    4. push old list onto retired; scan all slots; take out
+       every retired list nobody announces
+    5. unlock, then drop what was taken out
 ```
 
-The async side is structurally identical, with `Arc<dyn Fn(&E) ->
-BoxFuture<()>>` replacing `Arc<dyn Fn(&E)>` and the notify hot path
-running each future through a panic-catching adapter (`CatchUnwind`)
-plus an optional concurrent combinator (`JoinAll`).
+The async side uses the same `SnapCell`, with `Arc<dyn Fn(&E) ->
+BoxFuture<()>>` replacing `Arc<dyn Fn(&E)>` and the notify path
+running each future through panic-catching helpers that poll it in
+place (`src/future_ext.rs`).
 
 ---
 
@@ -57,7 +78,9 @@ src/
 ├── lib.rs                 — crate root; module declarations + re-exports
 ├── handler_id.rs          — opaque HandlerId + monotonic generator
 ├── panic.rs               — PanicInfo<'a>, PanicCallbackHolder (shared)
-├── future_ext.rs          — CatchUnwind, JoinAll  (feature: async)
+├── hazard.rs              — process-wide hazard-pointer domain (unsafe)
+├── snapshot.rs            — SnapCell<T>: hazard-protected Arc<T> (unsafe)
+├── future_ext.rs          — start, CatchUnwind, Slot  (feature: async)
 ├── sync/
 │   ├── mod.rs             — SyncRegistry<E>
 │   └── guard.rs           — HandlerGuard<E>  (RAII unregister)
@@ -72,9 +95,11 @@ tests/
 ├── panic_isolation.rs     — sync panic isolation, 9 tests
 ├── guards.rs              — HandlerGuard RAII, 8 tests
 ├── concurrent.rs          — sync multi-thread, 6 tests
-├── async_registry.rs      — async core, 10 tests   (feature: async)
+├── wait_and_once.rs       — *_and_wait, register_once, panic_count, 11 tests
+├── async_registry.rs      — async core, 9 tests   (feature: async)
 ├── async_priority.rs      — async priority, 3 tests
-├── async_panic.rs         — async panic isolation, 11 tests
+├── async_panic.rs         — async panic isolation, 10 tests
+├── async_start_panic.rs   — panic while building a future, 3 tests
 ├── async_guards.rs        — AsyncHandlerGuard, 7 tests
 ├── proptest_invariants.rs — property tests, 6 properties
 ├── leak_check.rs          — Arc::strong_count canary, 3 scenarios
@@ -83,7 +108,9 @@ tests/
 benches/
 ├── sync_notify.rs           — notify by handler count, by thread count
 ├── register_unregister.rs   — slow path latency at N = 0/16/100/1000
-├── contention.rs            — {1,4,16,64} threads × {1,4,16} handlers
+├── contention.rs            — {1,4,16,64} threads × {1,4,16} handlers;
+│                              contention/notify (shared counter) and
+│                              pure_read (no shared writes)
 └── async_notify.rs          — concurrent + sequential at N = 0/1/4/16
 
 examples/
@@ -106,31 +133,175 @@ fuzz/
     └── event_payload.rs       — adversarial event values
 ```
 
+`src/hazard.rs` and `src/snapshot.rs` are the only files that contain
+`unsafe`. Every block carries a `// SAFETY:` comment; see
+[`SECURITY.md`](./SECURITY.md#unsafe-code-discipline).
+
 ---
 
 ## Storage model
 
-### `ArcSwap<Vec<HandlerEntry<E>>>`
+### `SnapCell<Vec<HandlerEntry<E>>>`
 
 The single most important design decision: handlers live in a `Vec`
-held behind an
-[`arc_swap::ArcSwap`](https://docs.rs/arc-swap/latest/arc_swap/struct.ArcSwap.html).
+behind an `Arc`, and the `Arc` is published through a crate-internal
+`SnapCell<T>` (`src/snapshot.rs`). Every write replaces the whole list;
+no list is ever mutated after it is published.
 
-`ArcSwap` is a published primitive for **wait-free reads** and
-**atomic copy-on-write writes** of an `Arc<T>`. A read just loads an
-`Arc<T>` from an atomic pointer; a write produces a new `Arc<T>` and
-compare-and-swaps it into the slot.
+```rust
+pub(crate) struct SnapCell<T> {
+    current: AtomicPtr<T>,              // from Arc::into_raw, never null
+    retired_len: AtomicUsize,           // retired lists not yet freed
+    fallback_readers: AtomicUsize,      // readers on the locked fallback
+    writer: Mutex<Vec<Arc<T>>>,         // serializes writers; retired lists
+}
+```
 
 Properties this gives us:
 
-- **Readers never block writers, writers never block readers.** A
+- **Readers never block writers, writers never wait for readers.** A
   thread firing `notify` and a thread calling `register` proceed in
-  parallel with no coordination.
+  parallel. Readers never take the writer mutex (except on the
+  fallback path below).
 - **Each `notify` sees a consistent snapshot.** The `Vec` it iterates
-  over cannot be mutated mid-iteration because every write replaces
-  the whole `Arc<Vec>` atomically.
-- **Reader cost is one atomic acquire load** (plus a thread-local
-  cache fast-path inside `arc-swap`).
+  cannot change mid-iteration because writers replace the whole list.
+- **Reads touch no reference count.** A reader borrows the list in
+  place under a hazard announcement instead of cloning the `Arc`, so
+  concurrent readers do not contend on a shared counter.
+- **Writers cannot deadlock against handlers.** A handler that
+  unregisters itself or another handler during dispatch takes the
+  writer mutex, swaps, and returns; it never waits for the dispatch it
+  is running inside.
+
+### The hazard domain (`src/hazard.rs`)
+
+A *hazard pointer* is a per-thread announcement: "I am reading the
+object at this address; do not free it."
+
+- Each thread that dispatches gets one `Record` holding 8 announcement
+  slots, one per level of nested dispatch (a handler that calls
+  `notify` uses the next slot).
+- Records are `#[repr(align(128))]`, so no two threads' records share
+  a cache line or an adjacent-line prefetch pair. Without this, a
+  thread publishing an announcement would stall every thread whose
+  record sits on the same line.
+- Records live in an append-only, lock-free linked list. They are
+  never freed. When a thread exits, its record is marked free and the
+  next new thread reuses it, so the list length is bounded by the
+  peak number of threads that were dispatching at the same time.
+- This list is the crate's only global state. It has to be global
+  because an announcement must be visible to writers on every thread
+  for every registry. It is mutated only through atomics.
+
+### Reading
+
+`SnapCell::read(f)`:
+
+1. Load `current` (acquire).
+2. Claim the first free slot in this thread's record and store the
+   pointer into it (`SeqCst`).
+3. Load `current` again (`SeqCst`). If it changed, store the new
+   pointer into the same slot and repeat.
+4. Call `f(&*p)`: the list is borrowed in place.
+5. Clear the slot (release store). The `Pin` type does this in its
+   `Drop`, so it also happens when `f` unwinds.
+6. Load `retired_len` (relaxed). If it is non-zero, `try_lock` the
+   writer mutex and free every retired list no thread announces. If
+   the lock is busy, do nothing; a later reader or writer will free
+   them.
+
+### Writing
+
+`SnapCell::update(f)`:
+
+1. Lock the writer mutex.
+2. Run `f` on the current list. `f` returns `None` to leave the list
+   alone (unknown id in `unregister`, empty list in `clear`): nothing
+   is swapped and nothing is allocated.
+3. Otherwise store the new pointer into `current` (`SeqCst`) and push
+   the old `Arc` onto the retired list.
+4. Collect every pointer currently announced by any thread (`SeqCst`
+   loads), and move each retired list that is not announced out of the
+   retired list.
+5. Update `retired_len`, unlock, then drop the moved-out lists. User
+   `Drop` code (handler closures and their captures being freed) always
+   runs after the lock is released, so it may call back into the
+   registry.
+
+### Why it is correct
+
+The protocol is the classic hazard-pointer handshake, and both sides
+use `SeqCst` so that their operations fall into one total order.
+
+- **Reader:** store announcement *then* load `current`.
+- **Writer:** store `current` *then* load every announcement.
+
+Take a reader that announces `p` and a writer that replaces `p` and
+then scans. In the `SeqCst` total order, either the reader's
+announcement comes before the writer's scan reads that slot — so the
+writer sees `p` announced and keeps it — or it comes after. In the
+second case the writer's store to `current` precedes the scan, which
+precedes the reader's announcement, which precedes the reader's
+validating load; that load therefore sees the new pointer, the
+validation fails, and the reader retries without ever dereferencing
+`p`. Either way, a list is never freed while a reader that validated it
+is still using it.
+
+The record list needs the same treatment. A new thread publishes its
+record with a `SeqCst` compare-and-swap on the list head before its
+first announcement, and a writer's scan starts with a `SeqCst` load of
+the head. If the scan misses the new record, the head load precedes the
+publication in the total order, so the writer's store to `current`
+(earlier still) precedes the new thread's validating load, and that
+reader retries. With an acquire load of the head, both sides could miss
+each other; Miri's weak-memory emulation found exactly that
+interleaving during development, and the head now uses `SeqCst`.
+
+The pointer a reader keeps is the one `Arc::into_raw` produced, never
+one re-derived from a `&T`, so it carries provenance over the whole
+`Arc` allocation including the reference counts. Miri caught a
+violation of this in the owned-load path during development; it is
+fixed.
+
+### Fallback path
+
+`hazard::pin` returns `None` when the calling thread has no free slot:
+dispatch is nested more than 8 deep, or the thread's thread-local
+storage is already being torn down (a `notify` from another
+thread-local's destructor). `read` then increments
+`fallback_readers`, clones the current `Arc` under the writer lock, runs
+`f` on the clone, and decrements the counter. Slower, but correct, and
+visible to `wait_for_retired_readers`.
+
+### `wait_for_retired_readers`
+
+Backs `SyncRegistry::unregister_and_wait` and `clear_and_wait`. Called
+right after a successful write:
+
+1. If any reader is on the fallback path (and the caller is not one
+   itself), it is not yet safe; back off.
+2. Otherwise, under the writer lock, copy the pointers of every list on
+   the retired list. Release the lock and check whether any thread
+   *other than the caller* announces any of them.
+3. If none does, return. Otherwise back off and repeat.
+
+The backoff spins 64 rounds, yields 64 rounds, then sleeps with a
+growing delay capped at 1 ms.
+
+Consequences, all documented on the public methods:
+
+- Every list that was current before the write is either already freed
+  or on the retired list, so a reader still running the removed handler
+  is found and waited for. Readers that start afterwards load the new
+  list and are not waited for.
+- The calling thread's own announcements are skipped, so calling it
+  from inside a handler waits for other threads but not for the stack
+  frames above it.
+- The check covers *every* retired list, including ones retired by
+  later writes. The wait can be longer than strictly necessary, never
+  shorter.
+- If the caller is itself on the fallback path, fallback readers are
+  not waited for, because the caller may be one of them.
 
 ### `HandlerEntry<E>`
 
@@ -144,7 +315,7 @@ struct HandlerEntry<E: Send + Sync + 'static> {
 ```
 
 Cloning a `HandlerEntry` is one `HandlerId` copy + one `i32` copy +
-one `Arc::clone` (a refcount bump). Cloning the full `Vec` during
+one `Arc::clone` (a refcount bump). Building a new `Vec` during
 register/unregister is therefore `O(N)` *cheap* operations, not `O(N)`
 *allocations*.
 
@@ -169,16 +340,18 @@ comparable across registries.
 pub(crate) struct PanicCallbackHolder {
     inner: Arc<dyn Fn(&PanicInfo<'_>) + Send + Sync + 'static>,
 }
+
+panic_callback: RwLock<Option<Arc<PanicCallbackHolder>>>,
+panics: AtomicU64,
 ```
 
-The wrapper exists because `arc-swap`'s `RefCnt` trait requires the
-inner type to be `Sized`, but `dyn Fn` is not. Wrapping in a sized
-holder lets us use
-`ArcSwapOption<PanicCallbackHolder>` for atomic install/replace/clear.
-
-Reads of the panic callback happen on the **cold** path (inside
-`handle_panic`, after a handler has already panicked) so the
-single-load cost of `ArcSwapOption::load` is irrelevant.
+`on_panic` and `clear_panic_callback` take the write lock and replace
+the `Option`. `handle_panic` increments `panics`, takes the read lock
+just long enough to clone the `Arc`, and invokes the callback outside
+the lock. Both run only on the **cold** path (after a handler has
+already panicked), so a lock here costs nothing on the hot path.
+Poisoning is ignored: nothing that runs under the lock can leave the
+`Option` inconsistent.
 
 ---
 
@@ -187,30 +360,35 @@ single-load cost of `ArcSwapOption::load` is irrelevant.
 ```rust
 #[inline]
 pub fn notify(&self, event: &E) {
-    let snapshot = self.handlers.load();
-    for entry in snapshot.iter() {
-        let handler = &entry.handler;
-        let result = catch_unwind(AssertUnwindSafe(|| handler(event)));
-        if let Err(payload) = result {
-            self.handle_panic(entry.id, payload);
+    self.handlers.read(|list| {
+        for entry in list {
+            let handler = &entry.handler;
+            if let Err(payload) = catch_unwind(AssertUnwindSafe(|| handler(event))) {
+                self.handle_panic(entry.id, payload);
+            }
         }
-    }
+    });
 }
 ```
 
 Cost decomposition (measured, see `PERFORMANCE.md`):
 
-| Stage                              | Approximate cost |
-|------------------------------------|------------------|
-| `handlers.load()`                  | ~2 ns (one atomic acquire, thread-local cached) |
-| Per-entry: deref + iter step       | ~0.5 ns          |
-| Per-entry: `Arc<dyn Fn>` deref + vtable + indirect call | ~1 ns |
-| Per-entry: `catch_unwind` setup/teardown (no panic) | varies by OS |
-| Per-entry: total marginal          | **~1.6 ns**      |
+| Stage                                                   | Approximate cost |
+|---------------------------------------------------------|------------------|
+| Fixed per notify (TLS lookup, slot scan, `SeqCst` store, `SeqCst` load, release store, relaxed load) | ~5.4 ns (0-handler notify, including the call) |
+| Per-entry: `Arc<dyn Fn>` deref + vtable + indirect call | ~1 ns            |
+| Per-entry: `catch_unwind` setup/teardown (no panic)     | varies by OS     |
+| Per-entry: total marginal                               | **~1.2 ns**      |
 
 `handle_panic` is `#[cold]` so the linker keeps it out of the hot
 instruction cache. The Err branch is taken essentially never on a
 well-behaved handler set.
+
+One unwind boundary per handler is deliberate. A single `catch_unwind`
+around the whole loop, resuming after a panic, was measured and was
+about 36% slower at 16 handlers: the resume index has to live in memory
+across the unwind boundary, which costs more than the per-call
+`catch_unwind` it saves.
 
 ### Why `AssertUnwindSafe`?
 
@@ -220,8 +398,9 @@ trait objects technically are) don't satisfy this. We use
 `AssertUnwindSafe` to bypass the static check.
 
 The safety reasoning is documented in `docs/SECURITY.md`: the
-registry's own state lives behind an immutable `Arc<Vec<...>>` snapshot
-during iteration, so a panicking handler cannot corrupt it.
+registry's own state is an immutable, hazard-protected list during
+iteration, so a panicking handler cannot corrupt it, and the hazard
+slot is cleared by a `Drop` impl even when a panic unwinds through it.
 
 ### Why no `notify_trusted` variant?
 
@@ -235,46 +414,59 @@ hot path was not worth the imperceptible win.
 
 ## The slow path: `register` / `unregister` / `clear`
 
-All three use `ArcSwap::rcu` — the standard read-copy-update pattern:
+All three go through `SnapCell::update` (see [Writing](#writing)).
+The closures they pass:
 
 ```rust
-drop(self.handlers.rcu(|current| {
-    let mut new_vec: Vec<_> = Vec::with_capacity(current.len() + 1);
-    new_vec.extend(current.iter().cloned());
-    // … modify new_vec …
-    Arc::new(new_vec)
-}));
-```
+// register_with_priority
+let pos = current.partition_point(|e| e.priority >= entry.priority);
+let mut next = Vec::with_capacity(current.len() + 1);
+next.extend_from_slice(&current[..pos]);
+next.push(entry);
+next.extend_from_slice(&current[pos..]);
 
-`rcu` loads the current `Arc<Vec>`, runs the closure to produce a new
-`Arc<Vec>`, and compare-and-swaps it into the slot. If the CAS
-fails — because another writer raced — `rcu` retries from the load.
+// unregister: ids are unique, so copy the two slices around it
+let pos = current.iter().position(|e| e.id == id)?;   // None: no swap
+let mut next = Vec::with_capacity(current.len() - 1);
+next.extend_from_slice(&current[..pos]);
+next.extend_from_slice(&current[pos + 1..]);
+
+// clear
+(!current.is_empty()).then(|| (Vec::new(), ()))       // None: no swap
+```
 
 Properties:
 
-- **Linearizable across writers**: every write either lands or is
-  retried; no write is lost.
+- **Linearizable across writers**: writers are serialized on the
+  mutex, so every write sees the result of the previous one. There are
+  no retries.
 - **`O(N)` per write** in the number of handlers (one `Vec` allocation
-  + N `Arc::clone`s + one CAS).
-- **Reader-side has zero impact on writers**: the read-side `Guard`
-  from a concurrent `notify` does not block the writer's CAS.
+  + N `Arc::clone`s), plus an `O(threads × 8)` announcement scan.
+- **Writers never wait for readers.** A retired list that a reader is
+  still using stays on the retired list until that reader or a later
+  write frees it.
 
 ### Priority-sorted insertion
-
-```rust
-let pos = new_vec.partition_point(|e| e.priority >= entry.priority);
-new_vec.insert(pos, entry.clone());
-```
 
 `partition_point` is a binary search for the first index where the
 predicate flips from `true` to `false`. Inserting at that index
 keeps the vec sorted by descending priority with **stable** ordering
 within priority bucket.
 
-We chose `partition_point + insert` (= `O(log N + N)`) over a full
+We chose `partition_point` + copy (= `O(log N + N)`) over a full
 re-sort (= `O(N log N)`) because the rest of the slow path is already
 `O(N)` and binary-search insertion preserves stability without a
 custom comparator.
+
+### `register_once`
+
+`register_once` wraps the user's `FnOnce` in a `Mutex<Option<F>>`
+inside an ordinary `Fn` handler. On dispatch, the handler takes the
+`Option` under the lock and calls the closure outside it, so exactly
+one concurrent caller gets it and a panicking closure cannot poison
+later attempts. A drop guard holding a `Weak<SyncRegistry<E>>` then
+unregisters the id, also when the closure panics, without keeping the
+registry alive.
 
 ---
 
@@ -295,38 +487,30 @@ Handlers that need event data must `clone` it inside the closure
 before the inner `async move`. This is the canonical Rust async-fn
 limitation; the registry doesn't try to paper over it.
 
-### `CatchUnwind` (in `src/future_ext.rs`)
+A hazard slot is bound to a thread and cannot be held across an
+`.await`, so async `notify` takes an owned `Arc` of the list instead
+(`SnapCell::load_arc_if`: hazard-protected check, then one reference
+count increment). An empty registry is detected under the hazard
+without touching the reference count, so `notify` on an empty async
+registry allocates nothing and clones nothing.
 
-```rust
-struct CatchUnwind<F: Future> {
-    inner: Option<Pin<Box<F>>>,
-}
-```
+### Panic-isolating helpers (in `src/future_ext.rs`)
 
-Per-poll, `CatchUnwind` wraps `inner.as_mut().poll(cx)` in
-`catch_unwind`. On panic, the inner future is consumed (set to `None`)
-and the panic payload is returned as `Err`. On future completion the
-inner is likewise consumed. The `Option` discriminant guards against
-the otherwise-illegal "poll a Ready future" case.
+Handler futures are already boxed (`Pin<Box<dyn Future>>`) when the
+handler returns them, which makes them `Unpin`. The helpers poll them
+in place instead of boxing them again:
 
-### `JoinAll` (in `src/future_ext.rs`)
-
-```rust
-struct JoinAll<F: Future> {
-    slots: Vec<JoinSlot<F>>,
-    remaining: usize,
-}
-enum JoinSlot<F: Future> { Pending(Pin<Box<F>>), Done(F::Output) }
-```
-
-Polls every still-`Pending` slot per wake; transitions slots to
-`Done` as they resolve; yields a `Vec<F::Output>` once `remaining ==
-0`. Order of outputs is preserved.
-
-This is the **minimal** concurrent driver. We don't pull in
-`futures-util` (`join_all`, `select_all`, etc.) because we only need
-this one combinator and the dependency carries its own non-trivial
-surface. ~50 lines in-tree was the right trade-off.
+- **`start(make)`** calls the synchronous part of the handler (the
+  closure that builds the future) inside `catch_unwind`. Before 1.1.0
+  this call was outside any unwind boundary, so a handler that
+  panicked before returning its future escaped `notify`.
+- **`poll_caught(fut, cx)`** polls once inside `catch_unwind` and
+  turns a panic into `Ready(Err(payload))`.
+- **`CatchUnwind`** wraps one boxed future for the single-handler and
+  sequential paths. It drops the inner future as soon as it completes
+  or panics.
+- **`Slot`** is one handler's state in a concurrent dispatch:
+  `Running(BoxFuture)`, `Done`, or `Panicked(payload)`.
 
 ### Two dispatch modes
 
@@ -335,9 +519,11 @@ pub async fn notify(&self, event: &E)             // concurrent
 pub async fn notify_sequential(&self, event: &E)  // in priority order
 ```
 
-`notify`: builds one wrapped future per handler, drives them
-concurrently through `JoinAll`. Total wall-clock equals the slowest
-handler.
+`notify`: with one handler, awaits it through `CatchUnwind` (no join
+state). With more, builds a `Vec<Slot>` (one allocation) and drives it
+with `poll_fn`, polling every running slot on each wake until none is
+running. Panic payloads are reported to `on_panic` after all handlers
+finish, in priority order. Total wall-clock equals the slowest handler.
 
 `notify_sequential`: awaits each handler's future to completion
 before starting the next. Total wall-clock equals the sum of
@@ -418,6 +604,26 @@ The measured cost of `catch_unwind` on the no-panic path is
 negligible on our supported targets (see `PERFORMANCE.md`), so the
 trade-off is essentially free.
 
+### Why an in-tree hazard domain instead of a dependency?
+
+Through 1.0 the handler list lived in an atomically swappable `Arc`
+provided by an external crate. 1.1.0 replaced it with `SnapCell` for
+three reasons:
+
+1. **Read cost.** Borrowing in place under a hazard removes the fixed
+   per-`notify` cost that dominated small handler counts (0-handler
+   notify went from 9.5 ns to 5.4 ns) and scales across threads
+   because readers write only to their own cache line.
+2. **Waiting for readers.** `unregister_and_wait` needs to know which
+   retired lists another thread is still using. The announcements
+   provide exactly that.
+3. **Dependencies.** With default features the crate now has no
+   runtime dependencies.
+
+The cost is `unsafe`-bearing code that this crate must now maintain
+itself. It is confined to two internal modules, documented block by
+block, and checked with Miri (see `SECURITY.md`).
+
 ### Why no `tokio`/`async-std` runtime dependency?
 
 `AsyncRegistry` is generic over whatever async runtime polls its
@@ -443,18 +649,22 @@ When adding to `registry-io`, the in-tree convention is:
    `cargo test --features dhat-heap --test zero_alloc` still passes.
 4. **Async surface change** → mirror against the sync surface unless
    there's an explicit reason not to.
-5. **Doc** → at minimum: a one-line summary, `# Examples` with a
+5. **`unsafe` change** (`src/hazard.rs`, `src/snapshot.rs`) → every
+   block keeps a `// SAFETY:` comment, and the change is run under Miri
+   with weak-memory emulation and several random thread schedules.
+6. **Doc** → at minimum: a one-line summary, `# Examples` with a
    runnable example, and an entry in `docs/API.md` for any new public
    item. Update `docs/PATTERNS.md` if the new item introduces a new
    integration pattern.
-6. **CHANGELOG** → entry under `[Unreleased]` describing what
+7. **CHANGELOG** → entry under `[Unreleased]` describing what
    changed and why. Include a fix-up line if the change is a
    correction to a prior release's behavior.
-7. **Run the full gate**: `cargo fmt --all -- --check`,
-   `cargo clippy --all-targets --all-features -- -D warnings`,
-   `cargo test --all-features`, `RUSTDOCFLAGS="-D warnings" cargo doc
-   --no-deps --all-features`, `cargo build --all-features --examples`.
+8. **Run the full gate**: `cargo fmt --all -- --check`,
+   `cargo clippy --all-targets --all-features -- -D warnings` (and the
+   sync-only and async-only feature sets), `cargo test --all-features`,
+   `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features`,
+   `cargo build --all-features --examples`.
 
 ---
 
-<sub>registry-io v1.0.0 — Copyright © 2026 James Gober. Apache-2.0 OR MIT.</sub>
+<sub>registry-io v1.1.0 — Copyright © 2026 James Gober. Apache-2.0 OR MIT.</sub>

@@ -19,6 +19,187 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.1.0] - 2026-10-13
+
+Storage rewrite, four additive `SyncRegistry` methods, and an async
+panic-isolation fix. The `arc-swap` dependency is gone: with default
+features the crate has **zero runtime dependencies**. Every item frozen
+by [`docs/STABILITY-1.0.md`](docs/STABILITY-1.0.md) keeps its signature
+and semantics; upgrading from 1.0.0 requires no code change.
+
+### Added
+
+- **`SyncRegistry::unregister_and_wait(&self, id) -> bool`** — removes
+  the handler, then blocks until no other thread is still running it.
+  When it returns `true`, the handler is not running anywhere except
+  possibly further up the caller's own stack (when called from inside a
+  handler, it does not wait for itself), and it never runs again.
+  Returns `false` immediately for an unknown id. Spins, then yields,
+  then sleeps with a backoff capped at 1 ms; not for use from async
+  code. The wait is conservative: if more writes happen meanwhile, it
+  may also wait for readers of those newer retired lists.
+- **`SyncRegistry::clear_and_wait(&self)`** — the same guarantee for
+  `clear`.
+- **`SyncRegistry::register_once(self: &Arc<Self>, handler)`** — takes
+  an `FnOnce(&E) + Send + 'static` handler that runs at most once, even
+  under concurrent `notify` calls (exactly one caller runs it), then
+  unregisters itself, also when it panics. Holds only a `Weak` to the
+  registry. Default priority `0`.
+- **`SyncRegistry::panic_count(&self) -> u64`** — number of handler
+  panics caught by `notify`, counted with or without an `on_panic`
+  callback. Updated only on the panic path.
+- **`pure_read` benchmark group** in `benches/contention.rs`. Same
+  thread and handler sweep as `contention/notify`, but handlers do no
+  shared writes. See "Performance" below for why it exists.
+- **`tests/wait_and_once.rs`** (11 tests) for the new methods and
+  **`tests/async_start_panic.rs`** (3 tests, regression for the async
+  fix below).
+- **`deny.toml`** — `cargo deny check` configuration (license allow
+  list, advisories, bans, sources).
+
+### Changed
+
+- **New storage core.** Both registries now keep their handler list in
+  a crate-internal `SnapCell<T>` (`src/snapshot.rs`) protected by a
+  process-wide hazard-pointer domain (`src/hazard.rs`).
+  - Readers (`notify`, `handler_count`, `contains`, ...) announce the
+    current list pointer in a per-thread slot (one `SeqCst` store),
+    validate it with one `SeqCst` load, borrow the list in place, and
+    clear the slot (one release store). No reference-count traffic, no
+    lock, no allocation.
+  - Writers (`register*`, `unregister`, `clear`) serialize on a mutex
+    that readers never touch, swap in the new list, retire the old one,
+    and free every retired list that no thread announces. Handler
+    `Drop` code always runs after the lock is released. Writers never
+    wait for readers, so a handler that unregisters itself or another
+    handler cannot deadlock.
+  - A thread whose 8 announcement slots are all in use (dispatch nested
+    more than 8 deep) or whose thread-local storage is already torn
+    down falls back to cloning the `Arc` under the writer lock. Slower,
+    still correct.
+  - The per-thread announcement records form an append-only list that
+    is reused as threads exit; it is the crate's only global state and
+    is bounded by the peak number of concurrently dispatching threads.
+- **Writers no longer retry.** `ArcSwap::rcu` compare-and-swap retries
+  are replaced by a writer mutex. `unregister` of an unknown id and
+  `clear` of an empty registry now swap nothing and allocate nothing.
+  `unregister` locates the id once and copies the slices around it
+  into an exactly-sized `Vec`.
+- **Panic callback storage** is a `std::sync::RwLock<Option<Arc<...>>>`
+  (read only on the cold panic path).
+- **Async dispatch** polls handler futures in place. Each handler
+  future used to be boxed three times (handler wrapper, `CatchUnwind`,
+  `JoinAll`) plus four `Vec`s per `notify`, `3n + 4` allocations in
+  total. Now: `n + 1` for more than one handler, `n` for one handler,
+  none for an empty registry (detected without cloning the list).
+  Panic reporting order for concurrent `notify` is unchanged: after all
+  handlers finish, in priority order.
+- **`examples/pattern_hot_reload.rs`** stores its config snapshot in
+  `RwLock<Arc<ConfigSnapshot>>` instead of `arc_swap::ArcSwap`.
+- **CI** runs clippy for the sync-only (`--no-default-features
+  --features sync`) and async-only (`--no-default-features --features
+  async`) feature sets in addition to `--all-features`.
+- **Version refs** — `Cargo.toml` and `src/lib.rs#html_root_url` at
+  `1.1.0`; README install snippets at `"1.1"`; doc footers at
+  `v1.1.0`.
+
+### Fixed
+
+- **Async panic isolation (start of handler).** A handler that panicked
+  while *building* its future (the synchronous part of the closure,
+  before it returns the future) was called outside `catch_unwind`, so
+  the panic escaped `AsyncRegistry::notify` and `notify_sequential`,
+  violating the documented panic-isolation guarantee. Such a panic is
+  now isolated like a panic during `poll` and reported to `on_panic`.
+  Regression test: `tests/async_start_panic.rs` (fails on 1.0.0,
+  passes on 1.1.0).
+- **Feature-gated tests and examples.** Several tests and examples used
+  `SyncRegistry` without declaring the `sync` feature, so
+  `--no-default-features --features async` did not compile. They are
+  now gated with `#![cfg(feature = "sync")]` or `required-features` in
+  `Cargo.toml`.
+- **Missing `deny.toml`.** Without it `cargo deny check` rejected every
+  license; the file is now present and the check passes.
+
+### Removed
+
+- **`arc-swap` dependency.** With default features the crate has no
+  runtime dependencies. The optional `futures-core` dependency behind
+  the `async` feature is unchanged (still declared, not imported).
+- **Internal `JoinAll` combinator** (`src/future_ext.rs`), replaced by
+  in-place polling. It was never public.
+
+### Performance
+
+Windows 11, x86_64, stable Rust, criterion 0.5, bench profile
+`lto = "fat"`, `codegen-units = 1`, warm-up 1 s, measurement 3 s. Same
+machine and same benchmark code for both columns.
+
+| Benchmark                                   | 1.0.0     | 1.1.0     | Change |
+|---------------------------------------------|----------:|----------:|-------:|
+| Sync `notify`, 0 handlers                   |   9.49 ns |   5.41 ns |   -45% |
+| Sync `notify`, 1 handler                    |  10.50 ns |   6.37 ns |   -39% |
+| Sync `notify`, 4 handlers                   |  12.78 ns |   8.58 ns |   -32% |
+| Sync `notify`, 16 handlers                  |  26.38 ns |  24.78 ns |    -7% |
+| Sync `notify`, 64 handlers                  | 109.85 ns |  99.31 ns |    -9% |
+| `pure_read`, 64 threads, 1 handler          |  0.588 ns |  0.315 ns |   -46% |
+| `pure_read`, 64 threads, 16 handlers        |  2.018 ns |  1.529 ns |   -27% |
+| Async `notify` (concurrent), 1 handler      | 169.95 ns |  41.24 ns |   -76% |
+| Async `notify` (concurrent), 16 handlers    |  1.341 µs |  497.9 ns |   -62% |
+| Async `notify_sequential`, 1 handler        |  52.34 ns |  35.46 ns |   -32% |
+| Async `notify_sequential`, 16 handlers      |  884.3 ns |  469.9 ns |   -52% |
+| `register` into 0 handlers                  |  295.7 ns |  185.3 ns |   -41% |
+| `register` into 1000 handlers               |  24.74 µs |  27.75 µs |   +12% |
+| `unregister` from 1 handler                 |  280.7 ns |  154.0 ns |   -46% |
+| `unregister` from 1000 handlers             |  25.02 µs |  23.97 µs |    -4% |
+
+`pure_read` figures are wall-clock time divided by the total number of
+`notify` calls across all threads. The existing `contention/notify`
+group moved between -44% and +18% depending on the cell; every handler
+there increments an `AtomicU64` shared by all threads, so it mostly
+measures cache-line contention on that counter, and a faster read path
+can look slower because it hits the counter harder. `register` into
+100 and 1000 handlers is 7% and 12% slower: write cost at large counts
+is dominated by cloning every handler `Arc`, as in 1.0, and this
+control-plane path was traded for the faster read path. Full tables in
+[`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).
+
+### Verified (v1.1.0 release gates)
+
+```
+cargo fmt --all -- --check                                          OK
+cargo clippy --all-targets --all-features -- -D warnings            OK
+cargo clippy --all-targets --no-default-features --features sync    OK
+cargo clippy --all-targets --no-default-features --features async   OK
+cargo test --all-features                                           OK (180 tests)
+cargo +1.85.0 test --all-features                                   OK (180 tests)
+cargo test --features dhat-heap --test zero_alloc                   OK
+cargo doc --no-deps --all-features                                  OK (-D warnings)
+cargo deny check                                                    OK
+cargo audit                                                         OK
+```
+
+Tests pass on Windows and Linux on stable and on Rust 1.85.0. Clippy
+(pedantic, via the crate's lint configuration) is clean on
+`x86_64-pc-windows-msvc`, `x86_64-unknown-linux-gnu`, and
+`aarch64-apple-darwin` for the all-features, sync-only, and async-only
+feature sets.
+
+The new `unsafe` code in `src/snapshot.rs` and `src/hazard.rs` was run
+under Miri (undefined behavior, Stacked Borrows, data-race detection
+with weak-memory emulation) over the core tests, and over 64 random
+thread schedules for the concurrency tests. Miri found two bugs during
+development, both fixed before release: a pointer-provenance violation
+in the owned-load path, and a memory-ordering race in hazard-record
+publication (the record-list head now uses `SeqCst`, so a new thread's
+first announcement can never be missed by a writer's scan). See
+[`docs/SECURITY.md`](docs/SECURITY.md).
+
+[Unreleased]: https://github.com/jamesgober/registry-io/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/jamesgober/registry-io/releases/tag/v1.1.0
+
+---
+
 ## [1.0.0] - 2026-05-19
 
 **First stable release.** The public API is now frozen for the
