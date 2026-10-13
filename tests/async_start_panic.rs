@@ -7,18 +7,30 @@
 
 use std::future::Future;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Once};
 
 use registry_io::{AsyncRegistry, HandlerId};
 
 fn quiet_panics() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| std::panic::set_hook(Box::new(|_| {})));
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let default = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let payload = info.payload();
+            let message = payload
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
+            if !message.is_some_and(|m| m.starts_with("intentional")) {
+                default(info);
+            }
+        }));
+    });
 }
 
 /// A handler whose synchronous part panics.
 fn panics_before_future(_: &u32) -> std::future::Ready<()> {
-    panic!("panicked while building the future")
+    panic!("intentional: panicked while building the future")
 }
 
 fn counting(total: &Arc<AtomicU32>) -> impl Fn(&u32) -> std::future::Ready<()> + use<> {

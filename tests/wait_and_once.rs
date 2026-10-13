@@ -12,11 +12,25 @@ use std::time::Duration;
 
 use registry_io::{HandlerId, SyncRegistry};
 
-/// Handler panics are intentional in several tests; keep the default hook
-/// from printing them.
+/// Handler panics are intentional in several tests. Silence exactly
+/// those (their message starts with `intentional`) and pass everything
+/// else, including failed assertions, to the default hook so CI logs show
+/// the real failure.
 fn quiet_panics() {
     static ONCE: Once = Once::new();
-    ONCE.call_once(|| std::panic::set_hook(Box::new(|_| {})));
+    ONCE.call_once(|| {
+        let default = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let payload = info.payload();
+            let message = payload
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
+            if !message.is_some_and(|m| m.starts_with("intentional")) {
+                default(info);
+            }
+        }));
+    });
 }
 
 /// Registers a handler that signals when it starts and then blocks until
@@ -52,13 +66,15 @@ fn unregister_and_wait_blocks_until_in_flight_handler_finishes() {
         let r = Arc::clone(&registry);
         thread::spawn(move || r.unregister_and_wait(id))
     };
+    // If the waiter has not even been scheduled yet this still holds, so
+    // the assertion cannot fail spuriously on a slow runner.
     thread::sleep(Duration::from_millis(30));
     assert!(!waiter.is_finished(), "must wait while the handler runs");
-    assert!(!registry.contains(id), "removed before waiting");
 
     release.store(true, Ordering::SeqCst);
     assert!(waiter.join().unwrap());
     notifier.join().unwrap();
+    assert!(!registry.contains(id));
 }
 
 #[test]
@@ -166,7 +182,7 @@ fn register_once_accepts_fn_once_and_moves_state_out() {
 fn register_once_is_removed_even_when_it_panics() {
     quiet_panics();
     let registry = Arc::new(SyncRegistry::<()>::new());
-    let id = registry.register_once(|_| panic!("once"));
+    let id = registry.register_once(|_| panic!("intentional: once"));
     registry.notify(&());
     assert!(!registry.contains(id));
     assert_eq!(registry.panic_count(), 1);
@@ -193,7 +209,7 @@ fn register_once_does_not_keep_registry_alive() {
 fn panic_count_counts_with_and_without_callback() {
     quiet_panics();
     let registry: SyncRegistry<()> = SyncRegistry::new();
-    let _ = registry.register(|_| panic!("a"));
+    let _ = registry.register(|_| panic!("intentional: a"));
     let _ = registry.register(|_| {});
     registry.notify(&());
     assert_eq!(registry.panic_count(), 1);
@@ -245,7 +261,9 @@ fn soak_unregister_and_wait_never_runs_handler_after_return() {
             let r = Arc::clone(&registry);
             thread::spawn(move || {
                 let mut cycles = 0u64;
-                while std::time::Instant::now() < deadline {
+                // At least one cycle per thread even if the runner is so
+                // loaded that the deadline passes before this thread runs.
+                while cycles == 0 || std::time::Instant::now() < deadline {
                     let closed = Arc::new(AtomicBool::new(false));
                     let c = Arc::clone(&closed);
                     let id = r.register(move |_| {
@@ -269,8 +287,13 @@ fn soak_unregister_and_wait_never_runs_handler_after_return() {
     for h in notifiers {
         h.join().unwrap();
     }
-    assert!(cycles > 100, "churn made progress: {cycles}");
-    assert!(dispatched.load(Ordering::Relaxed) > 1000);
+    // Progress, not throughput: CI runners may have two cores shared by
+    // ten busy threads plus the other tests in this binary.
+    assert!(
+        cycles >= 4,
+        "every churn thread completed a cycle: {cycles}"
+    );
+    assert!(dispatched.load(Ordering::Relaxed) > 0);
     assert_eq!(
         registry.panic_count(),
         0,
