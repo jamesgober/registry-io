@@ -10,14 +10,14 @@
 
 use core::any::Any;
 use core::fmt;
+use core::sync::atomic::{AtomicU64, Ordering};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::Arc;
-
-use arc_swap::{ArcSwap, ArcSwapOption};
+use std::sync::{Arc, Mutex, PoisonError, RwLock, Weak};
 
 use crate::HandlerId;
 use crate::handler_id::HandlerIdGenerator;
 use crate::panic::{PanicCallbackHolder, PanicInfo};
+use crate::snapshot::SnapCell;
 
 pub mod guard;
 pub use guard::HandlerGuard;
@@ -82,8 +82,9 @@ impl<E: Send + Sync + 'static> fmt::Debug for HandlerEntry<E> {
 ///
 /// All methods can be called from any thread concurrently. Many threads may
 /// fire `notify` in parallel without serialization. Concurrent
-/// `register`/`unregister` calls coordinate via an atomic compare-and-swap
-/// retry loop (see [`arc_swap::ArcSwap::rcu`]).
+/// `register`/`unregister` calls are serialized on a writer lock that
+/// readers never touch; each builds a new handler list and swaps it in
+/// atomically.
 ///
 /// # Examples
 ///
@@ -114,9 +115,10 @@ impl<E: Send + Sync + 'static> fmt::Debug for HandlerEntry<E> {
 /// assert_eq!(counter.load(Ordering::Relaxed), 5);
 /// ```
 pub struct SyncRegistry<E: Send + Sync + 'static> {
-    handlers: ArcSwap<Vec<HandlerEntry<E>>>,
+    handlers: SnapCell<Vec<HandlerEntry<E>>>,
     id_generator: HandlerIdGenerator,
-    panic_callback: ArcSwapOption<PanicCallbackHolder>,
+    panic_callback: RwLock<Option<Arc<PanicCallbackHolder>>>,
+    panics: AtomicU64,
 }
 
 impl<E: Send + Sync + 'static> SyncRegistry<E> {
@@ -133,11 +135,7 @@ impl<E: Send + Sync + 'static> SyncRegistry<E> {
     /// ```
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            handlers: ArcSwap::from_pointee(Vec::new()),
-            id_generator: HandlerIdGenerator::new(),
-            panic_callback: ArcSwapOption::empty(),
-        }
+        Self::with_capacity(0)
     }
 
     /// Create a new, empty registry that pre-allocates room for `capacity`
@@ -158,9 +156,10 @@ impl<E: Send + Sync + 'static> SyncRegistry<E> {
     #[must_use]
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
-            handlers: ArcSwap::from_pointee(Vec::with_capacity(capacity)),
+            handlers: SnapCell::new(Vec::with_capacity(capacity)),
             id_generator: HandlerIdGenerator::new(),
-            panic_callback: ArcSwapOption::empty(),
+            panic_callback: RwLock::new(None),
+            panics: AtomicU64::new(0),
         }
     }
 
@@ -227,14 +226,20 @@ impl<E: Send + Sync + 'static> SyncRegistry<E> {
             priority,
             handler: Arc::new(handler),
         };
-        drop(self.handlers.rcu(|current| {
-            let mut new_vec: Vec<HandlerEntry<E>> = Vec::with_capacity(current.len() + 1);
-            new_vec.extend(current.iter().cloned());
-            let pos = new_vec.partition_point(|e| e.priority >= entry.priority);
-            new_vec.insert(pos, entry.clone());
-            Arc::new(new_vec)
-        }));
+        self.insert(entry);
         id
+    }
+
+    /// Inserts `entry` after every entry of equal or higher priority.
+    fn insert(&self, entry: HandlerEntry<E>) {
+        let _unit = self.handlers.update(|current| {
+            let pos = current.partition_point(|e| e.priority >= entry.priority);
+            let mut next = Vec::with_capacity(current.len() + 1);
+            next.extend_from_slice(&current[..pos]);
+            next.push(entry);
+            next.extend_from_slice(&current[pos..]);
+            Some((next, ()))
+        });
     }
 
     /// Register a handler and return a RAII [`HandlerGuard`] that
@@ -314,14 +319,78 @@ impl<E: Send + Sync + 'static> SyncRegistry<E> {
     /// assert!(!registry.unregister(id));
     /// ```
     pub fn unregister(&self, id: HandlerId) -> bool {
-        let mut removed = false;
-        drop(self.handlers.rcu(|current| {
-            let mut new_vec: Vec<HandlerEntry<E>> = Vec::with_capacity(current.len());
-            new_vec.extend(current.iter().filter(|e| e.id != id).cloned());
-            removed = new_vec.len() != current.len();
-            Arc::new(new_vec)
-        }));
+        self.remove_id(id)
+    }
+
+    /// Unregister a handler and wait until it has stopped running on
+    /// every other thread.
+    ///
+    /// [`unregister`](Self::unregister) guarantees that `notify` calls
+    /// *starting* after it returns will not run the handler, but a
+    /// `notify` already in progress on another thread may still be running
+    /// it. This method closes that window: when it returns `true`, the
+    /// handler is not running anywhere except, possibly, further up the
+    /// calling thread's own stack (when called from inside a handler), and
+    /// it will never run again. Use it before tearing down anything the
+    /// handler touches.
+    ///
+    /// Returns `false` without waiting if no handler with `id` was
+    /// registered.
+    ///
+    /// # Blocking
+    ///
+    /// Blocks the calling thread until in-flight dispatches on other
+    /// threads finish, so a handler that never returns makes this never
+    /// return. It spins briefly, then yields, then sleeps in steps of up
+    /// to one millisecond. Do not call it from async code; use
+    /// [`unregister`](Self::unregister) there.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use std::sync::atomic::{AtomicBool, Ordering};
+    /// use registry_io::SyncRegistry;
+    ///
+    /// let registry: SyncRegistry<()> = SyncRegistry::new();
+    /// let resource_open = Arc::new(AtomicBool::new(true));
+    /// let r = Arc::clone(&resource_open);
+    /// let id = registry.register(move |_| assert!(r.load(Ordering::SeqCst)));
+    ///
+    /// assert!(registry.unregister_and_wait(id));
+    /// // No thread can be inside the handler now; safe to close.
+    /// resource_open.store(false, Ordering::SeqCst);
+    /// registry.notify(&());
+    /// ```
+    pub fn unregister_and_wait(&self, id: HandlerId) -> bool {
+        let removed = self.remove_id(id);
+        if removed {
+            self.handlers.wait_for_retired_readers();
+        }
         removed
+    }
+
+    /// Removes the entry with `id` in one swap. Ids are unique, so the
+    /// new list is the two slices around it, built in one exactly-sized
+    /// allocation. Swaps nothing and returns `false` when `id` is absent.
+    fn remove_id(&self, id: HandlerId) -> bool {
+        self.handlers
+            .update(|current| {
+                let pos = current.iter().position(|e| e.id == id)?;
+                let mut next: Vec<HandlerEntry<E>> = Vec::with_capacity(current.len() - 1);
+                next.extend_from_slice(&current[..pos]);
+                next.extend_from_slice(&current[pos + 1..]);
+                Some((next, ()))
+            })
+            .is_some()
+    }
+
+    /// Removes every entry in one swap. Swaps nothing and returns `false`
+    /// when the list is already empty.
+    fn remove_all(&self) -> bool {
+        self.handlers
+            .update(|current| (!current.is_empty()).then(|| (Vec::new(), ())))
+            .is_some()
     }
 
     /// Remove every registered handler.
@@ -343,7 +412,111 @@ impl<E: Send + Sync + 'static> SyncRegistry<E> {
     /// assert_eq!(registry.handler_count(), 0);
     /// ```
     pub fn clear(&self) {
-        self.handlers.store(Arc::new(Vec::new()));
+        let _removed = self.remove_all();
+    }
+
+    /// Remove every handler and wait until none is still running on
+    /// another thread. The [`clear`](Self::clear) counterpart of
+    /// [`unregister_and_wait`](Self::unregister_and_wait), with the same
+    /// blocking behavior.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use registry_io::SyncRegistry;
+    ///
+    /// let registry: SyncRegistry<u8> = SyncRegistry::new();
+    /// let _ = registry.register(|_| {});
+    /// registry.clear_and_wait();
+    /// assert!(registry.is_empty());
+    /// ```
+    pub fn clear_and_wait(&self) {
+        if self.remove_all() {
+            self.handlers.wait_for_retired_readers();
+        }
+    }
+
+    /// Register a handler that runs at most once, then removes itself.
+    ///
+    /// The handler may be `FnOnce`. If several threads call `notify`
+    /// concurrently, exactly one of them runs it; the others skip it. It
+    /// is unregistered right after it runs (or after it panics), so
+    /// [`contains`](Self::contains) reports it gone from then on.
+    /// Registers at the default priority (`0`).
+    ///
+    /// The registry must be in an [`Arc`] so the handler can remove itself
+    /// without keeping the registry alive.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use std::sync::atomic::{AtomicU32, Ordering};
+    /// use registry_io::SyncRegistry;
+    ///
+    /// let registry = Arc::new(SyncRegistry::<u32>::new());
+    /// let seen = Arc::new(AtomicU32::new(0));
+    /// let s = Arc::clone(&seen);
+    /// let id = registry.register_once(move |n| {
+    ///     s.fetch_add(*n, Ordering::SeqCst);
+    /// });
+    ///
+    /// registry.notify(&5);
+    /// registry.notify(&7);
+    /// assert_eq!(seen.load(Ordering::SeqCst), 5);
+    /// assert!(!registry.contains(id));
+    /// ```
+    pub fn register_once<F>(self: &Arc<Self>, handler: F) -> HandlerId
+    where
+        F: FnOnce(&E) + Send + 'static,
+    {
+        let id = self.id_generator.next();
+        let registry = Arc::downgrade(self);
+        let slot = Mutex::new(Some(handler));
+        let once = move |event: &E| {
+            // Take under the lock, call outside it: the first caller wins,
+            // and a panicking handler cannot poison later attempts.
+            let taken = slot.lock().unwrap_or_else(PoisonError::into_inner).take();
+            if let Some(handler) = taken {
+                // Removes the handler on drop, so it is unregistered even
+                // when it panics.
+                let _remove = RemoveOnDrop {
+                    registry: registry.clone(),
+                    id,
+                };
+                handler(event);
+            }
+        };
+        self.insert(HandlerEntry {
+            id,
+            priority: 0,
+            handler: Arc::new(once),
+        });
+        id
+    }
+
+    /// Number of handler panics caught by `notify` since the registry was
+    /// created.
+    ///
+    /// Counted whether or not an [`on_panic`](Self::on_panic) callback is
+    /// installed, so it can back a health check or metric without one.
+    /// Updated only on the (cold) panic path, so it costs nothing while
+    /// handlers behave.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use registry_io::SyncRegistry;
+    ///
+    /// # std::panic::set_hook(Box::new(|_| {}));
+    /// let registry: SyncRegistry<()> = SyncRegistry::new();
+    /// let _ = registry.register(|_| panic!("boom"));
+    /// registry.notify(&());
+    /// assert_eq!(registry.panic_count(), 1);
+    /// ```
+    #[must_use]
+    pub fn panic_count(&self) -> u64 {
+        self.panics.load(Ordering::Relaxed)
     }
 
     /// Number of currently registered handlers.
@@ -365,7 +538,7 @@ impl<E: Send + Sync + 'static> SyncRegistry<E> {
     #[inline]
     #[must_use]
     pub fn handler_count(&self) -> usize {
-        self.handlers.load().len()
+        self.handlers.read(Vec::len)
     }
 
     /// Returns `true` if no handlers are registered.
@@ -385,7 +558,7 @@ impl<E: Send + Sync + 'static> SyncRegistry<E> {
     #[inline]
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.handlers.load().is_empty()
+        self.handlers.read(Vec::is_empty)
     }
 
     /// Returns `true` if a handler with the given id is currently registered.
@@ -403,7 +576,7 @@ impl<E: Send + Sync + 'static> SyncRegistry<E> {
     /// ```
     #[must_use]
     pub fn contains(&self, id: HandlerId) -> bool {
-        self.handlers.load().iter().any(|e| e.id == id)
+        self.handlers.read(|list| list.iter().any(|e| e.id == id))
     }
 
     /// Install a callback that will be invoked when a registered handler
@@ -450,7 +623,10 @@ impl<E: Send + Sync + 'static> SyncRegistry<E> {
         F: Fn(&PanicInfo<'_>) + Send + Sync + 'static,
     {
         let holder = Arc::new(PanicCallbackHolder::new(callback));
-        self.panic_callback.store(Some(holder));
+        *self
+            .panic_callback
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = Some(holder);
     }
 
     /// Remove any previously installed panic callback.
@@ -469,7 +645,10 @@ impl<E: Send + Sync + 'static> SyncRegistry<E> {
     /// // No callback is installed; handler panics now go to /dev/null.
     /// ```
     pub fn clear_panic_callback(&self) {
-        self.panic_callback.store(None);
+        *self
+            .panic_callback
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = None;
     }
 
     /// Dispatch `event` to every registered handler.
@@ -511,22 +690,31 @@ impl<E: Send + Sync + 'static> SyncRegistry<E> {
     /// allocation. See `docs/PERFORMANCE.md` for measured numbers.
     #[inline]
     pub fn notify(&self, event: &E) {
-        let snapshot = self.handlers.load();
-        for entry in snapshot.iter() {
-            let handler = &entry.handler;
-            let result = catch_unwind(AssertUnwindSafe(|| handler(event)));
-            if let Err(payload) = result {
-                self.handle_panic(entry.id, payload);
+        self.handlers.read(|list| {
+            // One unwind boundary per handler. A single boundary around
+            // the whole loop was measured and is slower: the resume index
+            // must live in memory across the boundary, which costs more
+            // than the per-call `catch_unwind` it saves.
+            for entry in list {
+                let handler = &entry.handler;
+                if let Err(payload) = catch_unwind(AssertUnwindSafe(|| handler(event))) {
+                    self.handle_panic(entry.id, payload);
+                }
             }
-        }
+        });
     }
 
     /// Internal: invoke the installed panic callback, if any. Suppresses
     /// panics inside the callback itself.
     #[cold]
     fn handle_panic(&self, handler_id: HandlerId, payload: Box<dyn Any + Send + 'static>) {
-        let guard = self.panic_callback.load();
-        if let Some(holder) = guard.as_ref() {
+        let _previous = self.panics.fetch_add(1, Ordering::Relaxed);
+        let holder = self
+            .panic_callback
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        if let Some(holder) = holder {
             let info = PanicInfo::new(handler_id, payload.as_ref());
             // If the user's panic callback itself panics, swallow the
             // second-order panic. Recursion into our own machinery is
@@ -534,6 +722,20 @@ impl<E: Send + Sync + 'static> SyncRegistry<E> {
             drop(catch_unwind(AssertUnwindSafe(|| holder.invoke(&info))));
         }
         drop(payload);
+    }
+}
+
+/// Unregisters a [`SyncRegistry::register_once`] handler when dropped.
+struct RemoveOnDrop<E: Send + Sync + 'static> {
+    registry: Weak<SyncRegistry<E>>,
+    id: HandlerId,
+}
+
+impl<E: Send + Sync + 'static> Drop for RemoveOnDrop<E> {
+    fn drop(&mut self) {
+        if let Some(registry) = self.registry.upgrade() {
+            let _removed = registry.unregister(self.id);
+        }
     }
 }
 
@@ -546,8 +748,15 @@ impl<E: Send + Sync + 'static> Default for SyncRegistry<E> {
 impl<E: Send + Sync + 'static> fmt::Debug for SyncRegistry<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SyncRegistry")
-            .field("handler_count", &self.handlers.load().len())
-            .field("has_panic_callback", &self.panic_callback.load().is_some())
+            .field("handler_count", &self.handler_count())
+            .field(
+                "has_panic_callback",
+                &self
+                    .panic_callback
+                    .read()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .is_some(),
+            )
             .finish_non_exhaustive()
     }
 }

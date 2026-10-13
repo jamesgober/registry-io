@@ -3,6 +3,7 @@
 //! These exercise the lock-free read path under contention as well as
 //! interleaved register/unregister against active readers.
 
+#![cfg(feature = "sync")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::sync::Arc;

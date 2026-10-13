@@ -1,5 +1,6 @@
 //! Smoke test - verifies the crate is reachable and the headline API works.
 
+#![cfg(feature = "sync")]
 use registry_io::{HandlerId, SyncRegistry};
 
 #[test]

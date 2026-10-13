@@ -4,13 +4,13 @@
 //!
 //! Two flavors are measured:
 //!
-//! - `async_notify/concurrent/N_handlers` — `AsyncRegistry::notify` via the
-//!   crate-local `JoinAll` combinator.
+//! - `async_notify/concurrent/N_handlers` — `AsyncRegistry::notify`, which
+//!   polls every handler future in place.
 //! - `async_notify/sequential/N_handlers` — `AsyncRegistry::notify_sequential`.
 //!
 //! Both use trivially-fast handlers (no real `.await` work). Their cost is
-//! dominated by the boxed-future allocation per handler plus the
-//! `catch_unwind` setup.
+//! dominated by the boxed-future allocation per handler (the only
+//! allocation per handler since 1.1.0) plus the `catch_unwind` setup.
 
 #![cfg(feature = "async")]
 

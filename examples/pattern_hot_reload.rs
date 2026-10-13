@@ -11,8 +11,8 @@
 //!
 //! Run with: `cargo run --example pattern_hot_reload`
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, PoisonError, RwLock};
 
 use registry_io::SyncRegistry;
 
@@ -28,7 +28,7 @@ struct ConfigSnapshot {
 /// The `Config` type itself owns the registry and is the only entity
 /// that mutates the snapshot.
 struct Config {
-    snapshot: arc_swap::ArcSwap<ConfigSnapshot>,
+    snapshot: RwLock<Arc<ConfigSnapshot>>,
     on_change: Arc<SyncRegistry<ConfigSnapshot>>,
     generation: AtomicU64,
 }
@@ -36,15 +36,15 @@ struct Config {
 impl Config {
     fn new(initial: ConfigSnapshot) -> Self {
         Self {
-            snapshot: arc_swap::ArcSwap::from_pointee(initial),
+            snapshot: RwLock::new(Arc::new(initial)),
             on_change: Arc::new(SyncRegistry::new()),
             generation: AtomicU64::new(0),
         }
     }
 
-    /// Read the current snapshot. Lock-free, cheap to call.
+    /// Read the current snapshot: a brief read lock and one `Arc` clone.
     fn current(&self) -> Arc<ConfigSnapshot> {
-        self.snapshot.load_full()
+        Arc::clone(&self.snapshot.read().unwrap_or_else(PoisonError::into_inner))
     }
 
     /// Apply a mutation atomically, then notify every subscriber.
@@ -52,12 +52,19 @@ impl Config {
     where
         F: FnOnce(&mut ConfigSnapshot),
     {
-        let current = self.snapshot.load_full();
-        let mut next = (*current).clone();
-        f(&mut next);
-        next.generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
-        let next = Arc::new(next);
-        self.snapshot.store(Arc::clone(&next));
+        let next = {
+            let mut slot = self
+                .snapshot
+                .write()
+                .unwrap_or_else(PoisonError::into_inner);
+            let mut next = (**slot).clone();
+            f(&mut next);
+            next.generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+            let next = Arc::new(next);
+            *slot = Arc::clone(&next);
+            next
+        };
+        // Notify outside the lock so subscribers may read `current()`.
         self.on_change.notify(&*next);
     }
 }

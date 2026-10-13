@@ -11,14 +11,13 @@ use core::any::Any;
 use core::fmt;
 use core::future::Future;
 use core::pin::Pin;
-use std::sync::Arc;
-
-use arc_swap::{ArcSwap, ArcSwapOption};
+use std::sync::{Arc, PoisonError, RwLock};
 
 use crate::HandlerId;
-use crate::future_ext::{CatchUnwind, JoinAll};
+use crate::future_ext::{CatchUnwind, Slot, start};
 use crate::handler_id::HandlerIdGenerator;
 use crate::panic::{PanicCallbackHolder, PanicInfo};
+use crate::snapshot::SnapCell;
 
 /// `Pin<Box<dyn Future<Output = T> + Send + 'static>>` — the type-erased
 /// boxed future stored inside the registry. Defined locally rather than
@@ -64,11 +63,11 @@ impl<E: Send + Sync + 'static> fmt::Debug for AsyncHandlerEntry<E> {
 
 /// Asynchronous event registry.
 ///
-/// Same lock-free, `ArcSwap`-backed read path as [`crate::SyncRegistry`], but
+/// Same lock-free, hazard-protected read path as [`crate::SyncRegistry`], but
 /// handlers return a future of `()`. Two dispatch modes are available:
 ///
 /// - [`AsyncRegistry::notify`] — drives every handler concurrently via a
-///   crate-local `JoinAll` combinator. Faster total wall-clock for
+///   a crate-local join that polls them in place. Faster total wall-clock for
 ///   handlers that perform real `.await` work, since they make progress in
 ///   parallel under the runtime.
 /// - [`AsyncRegistry::notify_sequential`] — awaits each handler in order.
@@ -110,9 +109,9 @@ impl<E: Send + Sync + 'static> fmt::Debug for AsyncHandlerEntry<E> {
 /// # }
 /// ```
 pub struct AsyncRegistry<E: Send + Sync + 'static> {
-    handlers: ArcSwap<Vec<AsyncHandlerEntry<E>>>,
+    handlers: SnapCell<Vec<AsyncHandlerEntry<E>>>,
     id_generator: HandlerIdGenerator,
-    panic_callback: ArcSwapOption<PanicCallbackHolder>,
+    panic_callback: RwLock<Option<Arc<PanicCallbackHolder>>>,
 }
 
 impl<E: Send + Sync + 'static> AsyncRegistry<E> {
@@ -128,11 +127,7 @@ impl<E: Send + Sync + 'static> AsyncRegistry<E> {
     /// ```
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            handlers: ArcSwap::from_pointee(Vec::new()),
-            id_generator: HandlerIdGenerator::new(),
-            panic_callback: ArcSwapOption::empty(),
-        }
+        Self::with_capacity(0)
     }
 
     /// Create a new, empty async registry with pre-allocated handler
@@ -149,9 +144,9 @@ impl<E: Send + Sync + 'static> AsyncRegistry<E> {
     #[must_use]
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
-            handlers: ArcSwap::from_pointee(Vec::with_capacity(capacity)),
+            handlers: SnapCell::new(Vec::with_capacity(capacity)),
             id_generator: HandlerIdGenerator::new(),
-            panic_callback: ArcSwapOption::empty(),
+            panic_callback: RwLock::new(None),
         }
     }
 
@@ -218,13 +213,14 @@ impl<E: Send + Sync + 'static> AsyncRegistry<E> {
             priority,
             handler: boxed,
         };
-        drop(self.handlers.rcu(|current| {
-            let mut new_vec: Vec<AsyncHandlerEntry<E>> = Vec::with_capacity(current.len() + 1);
-            new_vec.extend(current.iter().cloned());
-            let pos = new_vec.partition_point(|e| e.priority >= entry.priority);
-            new_vec.insert(pos, entry.clone());
-            Arc::new(new_vec)
-        }));
+        let _unit = self.handlers.update(|current| {
+            let pos = current.partition_point(|e| e.priority >= entry.priority);
+            let mut next = Vec::with_capacity(current.len() + 1);
+            next.extend_from_slice(&current[..pos]);
+            next.push(entry);
+            next.extend_from_slice(&current[pos..]);
+            Some((next, ()))
+        });
         id
     }
 
@@ -305,14 +301,30 @@ impl<E: Send + Sync + 'static> AsyncRegistry<E> {
     /// assert!(!registry.unregister(id));
     /// ```
     pub fn unregister(&self, id: HandlerId) -> bool {
-        let mut removed = false;
-        drop(self.handlers.rcu(|current| {
-            let mut new_vec: Vec<AsyncHandlerEntry<E>> = Vec::with_capacity(current.len());
-            new_vec.extend(current.iter().filter(|e| e.id != id).cloned());
-            removed = new_vec.len() != current.len();
-            Arc::new(new_vec)
-        }));
-        removed
+        self.remove_id(id)
+    }
+
+    /// Removes the entry with `id` in one swap. Ids are unique, so the
+    /// new list is the two slices around it, built in one exactly-sized
+    /// allocation. Swaps nothing and returns `false` when `id` is absent.
+    fn remove_id(&self, id: HandlerId) -> bool {
+        self.handlers
+            .update(|current| {
+                let pos = current.iter().position(|e| e.id == id)?;
+                let mut next: Vec<AsyncHandlerEntry<E>> = Vec::with_capacity(current.len() - 1);
+                next.extend_from_slice(&current[..pos]);
+                next.extend_from_slice(&current[pos + 1..]);
+                Some((next, ()))
+            })
+            .is_some()
+    }
+
+    /// Removes every entry in one swap. Swaps nothing and returns `false`
+    /// when the list is already empty.
+    fn remove_all(&self) -> bool {
+        self.handlers
+            .update(|current| (!current.is_empty()).then(|| (Vec::new(), ())))
+            .is_some()
     }
 
     /// Remove every registered handler.
@@ -333,7 +345,7 @@ impl<E: Send + Sync + 'static> AsyncRegistry<E> {
     /// assert_eq!(registry.handler_count(), 0);
     /// ```
     pub fn clear(&self) {
-        self.handlers.store(Arc::new(Vec::new()));
+        let _removed = self.remove_all();
     }
 
     /// Current handler count. `O(1)` atomic snapshot.
@@ -351,7 +363,7 @@ impl<E: Send + Sync + 'static> AsyncRegistry<E> {
     #[inline]
     #[must_use]
     pub fn handler_count(&self) -> usize {
-        self.handlers.load().len()
+        self.handlers.read(Vec::len)
     }
 
     /// `true` if no handlers are registered.
@@ -369,7 +381,7 @@ impl<E: Send + Sync + 'static> AsyncRegistry<E> {
     #[inline]
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.handlers.load().is_empty()
+        self.handlers.read(Vec::is_empty)
     }
 
     /// `true` if a handler with `id` is currently registered.
@@ -387,7 +399,7 @@ impl<E: Send + Sync + 'static> AsyncRegistry<E> {
     /// ```
     #[must_use]
     pub fn contains(&self, id: HandlerId) -> bool {
-        self.handlers.load().iter().any(|e| e.id == id)
+        self.handlers.read(|list| list.iter().any(|e| e.id == id))
     }
 
     /// Install a panic callback fired once per panicking handler future
@@ -421,7 +433,10 @@ impl<E: Send + Sync + 'static> AsyncRegistry<E> {
         F: Fn(&PanicInfo<'_>) + Send + Sync + 'static,
     {
         let holder = Arc::new(PanicCallbackHolder::new(callback));
-        self.panic_callback.store(Some(holder));
+        *self
+            .panic_callback
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = Some(holder);
     }
 
     /// Remove any previously installed panic callback. Subsequent
@@ -437,15 +452,22 @@ impl<E: Send + Sync + 'static> AsyncRegistry<E> {
     /// registry.clear_panic_callback();
     /// ```
     pub fn clear_panic_callback(&self) {
-        self.panic_callback.store(None);
+        *self
+            .panic_callback
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = None;
     }
 
     /// Dispatch `event` to every registered handler **concurrently**.
     ///
-    /// Builds one future per handler, then awaits them all via the
-    /// crate-local `JoinAll` combinator. Each handler future is wrapped in
-    /// a crate-local `CatchUnwind` adapter so a panic in one handler does
-    /// not poison the join — its sibling handlers continue.
+    /// Builds one future per handler, then polls them all in place until
+    /// every one has finished. A panic while a handler builds its future or
+    /// while it is polled is isolated: sibling handlers continue, and the
+    /// `on_panic` callback runs once per panicking handler, in priority
+    /// order, after all handlers have finished.
+    ///
+    /// Allocations per call: one per handler (its boxed future) plus one
+    /// for the join state when there is more than one handler.
     ///
     /// # Examples
     ///
@@ -474,28 +496,47 @@ impl<E: Send + Sync + 'static> AsyncRegistry<E> {
     /// # }
     /// ```
     pub async fn notify(&self, event: &E) {
-        let snapshot = self.handlers.load();
-        if snapshot.is_empty() {
+        let Some(list) = self.handlers.load_arc_if(|l| !l.is_empty()) else {
             return;
-        }
-
-        // Single pass over the snapshot, producing parallel `ids` and
-        // `wrapped` vectors so we can attribute each post-join outcome
-        // back to its originating handler. `JoinAll` preserves input
-        // order, so a positional zip is exact and saves the intermediate
-        // `pairs` allocation the prior implementation needed.
-        let n = snapshot.len();
-        let mut ids: Vec<HandlerId> = Vec::with_capacity(n);
-        let mut wrapped = Vec::with_capacity(n);
-        for entry in snapshot.iter() {
-            ids.push(entry.id);
-            wrapped.push(CatchUnwind::new((entry.handler)(event)));
-        }
-        let results = JoinAll::new(wrapped).await;
-
-        for (id, outcome) in ids.into_iter().zip(results) {
-            if let Err(payload) = outcome {
-                self.handle_panic(id, payload);
+        };
+        match list.as_slice() {
+            [] => {}
+            [only] => {
+                let outcome = match start(|| (only.handler)(event)) {
+                    Ok(fut) => CatchUnwind::new(fut).await,
+                    Err(payload) => Err(payload),
+                };
+                if let Err(payload) = outcome {
+                    self.handle_panic(only.id, payload);
+                }
+            }
+            many => {
+                let mut slots: Vec<Slot> = many
+                    .iter()
+                    .map(|entry| Slot::new(start(|| (entry.handler)(event))))
+                    .collect();
+                let mut running = slots
+                    .iter()
+                    .filter(|s| matches!(s, Slot::Running(_)))
+                    .count();
+                core::future::poll_fn(|cx| {
+                    for slot in &mut slots {
+                        if matches!(slot, Slot::Running(_)) && slot.poll(cx) {
+                            running -= 1;
+                        }
+                    }
+                    if running == 0 {
+                        core::task::Poll::Ready(())
+                    } else {
+                        core::task::Poll::Pending
+                    }
+                })
+                .await;
+                for (entry, slot) in many.iter().zip(slots) {
+                    if let Slot::Panicked(payload) = slot {
+                        self.handle_panic(entry.id, payload);
+                    }
+                }
             }
         }
     }
@@ -534,12 +575,16 @@ impl<E: Send + Sync + 'static> AsyncRegistry<E> {
     /// # }
     /// ```
     pub async fn notify_sequential(&self, event: &E) {
-        let snapshot = self.handlers.load();
-        for entry in snapshot.iter() {
-            let fut = (entry.handler)(event);
-            match CatchUnwind::new(fut).await {
-                Ok(()) => {}
-                Err(payload) => self.handle_panic(entry.id, payload),
+        let Some(list) = self.handlers.load_arc_if(|l| !l.is_empty()) else {
+            return;
+        };
+        for entry in list.iter() {
+            let outcome = match start(|| (entry.handler)(event)) {
+                Ok(fut) => CatchUnwind::new(fut).await,
+                Err(payload) => Err(payload),
+            };
+            if let Err(payload) = outcome {
+                self.handle_panic(entry.id, payload);
             }
         }
     }
@@ -548,8 +593,12 @@ impl<E: Send + Sync + 'static> AsyncRegistry<E> {
     /// Mirrors [`crate::SyncRegistry`]'s panic plumbing.
     #[cold]
     fn handle_panic(&self, handler_id: HandlerId, payload: Box<dyn Any + Send + 'static>) {
-        let guard = self.panic_callback.load();
-        if let Some(holder) = guard.as_ref() {
+        let holder = self
+            .panic_callback
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        if let Some(holder) = holder {
             let info = PanicInfo::new(handler_id, payload.as_ref());
             drop(std::panic::catch_unwind(std::panic::AssertUnwindSafe(
                 || {
@@ -570,8 +619,15 @@ impl<E: Send + Sync + 'static> Default for AsyncRegistry<E> {
 impl<E: Send + Sync + 'static> fmt::Debug for AsyncRegistry<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AsyncRegistry")
-            .field("handler_count", &self.handlers.load().len())
-            .field("has_panic_callback", &self.panic_callback.load().is_some())
+            .field("handler_count", &self.handler_count())
+            .field(
+                "has_panic_callback",
+                &self
+                    .panic_callback
+                    .read()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .is_some(),
+            )
             .finish_non_exhaustive()
     }
 }

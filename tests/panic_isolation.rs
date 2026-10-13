@@ -1,6 +1,7 @@
 //! Panic-isolation tests: a panicking handler must not interfere with
 //! siblings, and the registry must offer observability via `on_panic`.
 
+#![cfg(feature = "sync")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::panic::panic_any;

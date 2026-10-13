@@ -29,11 +29,11 @@
 </p>
 
 <p>
-    Unlike pub/sub brokers and distributed messaging systems, <strong>registry-io</strong> stays focused on a single problem: fast in-process notification. A sync-first design means handlers run inline on the producer's thread with minimal coordination overhead. Optional async support is reserved for a future release; sync users pay zero cost for features they don't use.
+    Unlike pub/sub brokers and distributed messaging systems, <strong>registry-io</strong> stays focused on a single problem: fast in-process notification. A sync-first design means handlers run inline on the producer's thread with minimal coordination overhead. Async handlers are available behind the <code>async</code> feature; sync users pay zero cost for features they don't use.
 </p>
 
 <p>
-    With its lock-free architecture, <strong>registry-io</strong> uses <a href="https://docs.rs/arc-swap"><code>ArcSwap</code></a> snapshots for reader-side access and atomic clone-then-swap for writer-side updates. Many threads can fire notifications simultaneously without blocking each other, while handler registration and unregistration happen on a separate slow path that does not interfere with the hot read path.
+    Readers borrow the current handler list in place under a hazard-pointer announcement: no lock, no reference-count traffic, no allocation. Writers build a new list, swap it in, and free the old one once no thread is still reading it. Many threads can fire notifications simultaneously without blocking each other, while handler registration and unregistration happen on a separate slow path that never waits for readers. With default features the crate has no runtime dependencies.
 </p>
 
 ---
@@ -42,9 +42,10 @@
 ## Highlights
 
 - **Cross-platform** — Linux, macOS, Windows.
-- **Lock-free reads** via `ArcSwap` snapshots. Many threads can `notify`
-  concurrently with no coordination.
+- **Lock-free reads** via hazard-protected snapshots. Many threads can
+  `notify` concurrently with no lock and no shared reference count.
 - **Zero allocation** on the no-panic sync notify path.
+- **Zero runtime dependencies** with default features.
 - **Panic isolation** — a panicking handler does not stop siblings nor
   propagate to the caller. Optional `on_panic` callback for observability.
   Works for both sync handlers and async futures.
@@ -55,6 +56,13 @@
   futures-returning handlers, concurrent or sequential dispatch.
 - **RAII guards** — `register_guard` returns a `HandlerGuard` /
   `AsyncHandlerGuard` that unregisters on drop.
+- **Safe teardown** — `unregister_and_wait` / `clear_and_wait` return
+  only once no other thread is still running the removed handlers.
+- **One-shot handlers** — `register_once` takes an `FnOnce` that runs
+  at most once, even under concurrent `notify` calls, then removes
+  itself.
+- **Panic counter** — `panic_count` reports caught handler panics with
+  or without an `on_panic` callback.
 - **`Send + Sync`** — share registries freely across threads.
 
 
@@ -63,25 +71,32 @@
 
 ## Status
 
-**Stable. Production-ready.** `registry-io 1.0.0` is the first
-stable release. The public API is **frozen** per the contract in
+**Stable. Production-ready.** The current release is `registry-io
+1.1.0`. The public API is **frozen** per the contract in
 [`docs/STABILITY-1.0.md`](docs/STABILITY-1.0.md); breaking changes
-require a major-version bump. Performance, panic-isolation, and
-zero-allocation guarantees are measured and locked in.
+require a major-version bump. 1.1.0 is additive: it adds four
+`SyncRegistry` methods, replaces the internal storage, and drops the
+crate's only default runtime dependency without changing any frozen
+item. Performance, panic-isolation, and zero-allocation guarantees are
+measured and locked in.
 
-Headline numbers (full table in
+Headline numbers for 1.1.0 (full tables in
 [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md)):
 
-- Sync `notify`, 1 handler, 1 thread — **10.1 ns**
-- Sync `notify`, 4 handlers, 16 threads contended — **24.7 ns**
-- Async `notify` concurrent, 1 handler — **177 ns**
-- Async `notify_sequential`, 1 handler — **53 ns**
+- Sync `notify`, 1 handler, 1 thread — **6.4 ns**
+- Sync `notify`, 0 handlers, 1 thread — **5.4 ns**
+- Sync `notify`, 1 handler, 64 threads, handlers with no shared
+  writes — **0.31 ns** per notify (wall-clock divided by total calls)
+- Async `notify` concurrent, 1 handler — **41 ns**
+- Async `notify_sequential`, 1 handler — **35 ns**
 - Sync `notify` hot path heap allocations — **0** (verified by `dhat`)
 
 Guarantees:
 
-- **Zero `unsafe` in the public API.**
-- **Lock-free reads** via `ArcSwap` snapshots.
+- **Zero `unsafe` in the public API.** The crate's own `unsafe` is
+  confined to two internal modules and checked with Miri; see
+  [`docs/SECURITY.md`](docs/SECURITY.md).
+- **Lock-free reads** via hazard-protected snapshots.
 - **Zero allocation** on the sync notify no-panic path.
 - **Panic isolation** — one panicking handler does not stop siblings
   or propagate to the caller.
@@ -119,7 +134,7 @@ Use `registry-io` when you have:
 
 ```toml
 [dependencies]
-registry-io = "1.0"
+registry-io = "1.1"
 ```
 
 ```rust
@@ -199,7 +214,7 @@ registry.notify(&()); // returns cleanly; both effects observed
 
 ```toml
 [dependencies]
-registry-io = { version = "1.0", features = ["async"] }
+registry-io = { version = "1.1", features = ["async"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 
@@ -235,9 +250,10 @@ async fn main() {
 }
 ```
 
-Same lock-free read path as `SyncRegistry`. Panics in handler futures are
-caught via an internal `CatchUnwind` adapter and surfaced through
-`on_panic`, just like sync handlers.
+Same lock-free read path as `SyncRegistry`. Panics in handler futures,
+whether raised while the handler builds its future or while it is
+polled, are caught and surfaced through `on_panic`, just like sync
+handlers.
 
 See [`examples/`](examples/) for runnable programs and [`docs/API.md`](docs/API.md)
 for the full reference.
@@ -269,7 +285,7 @@ for the full reference.
   concurrency characteristics.
 - [`docs/SECURITY.md`](docs/SECURITY.md) — threat model, panic isolation
   detail, fuzz methodology.
-- [`docs/STABILITY-1.0.md`](docs/STABILITY-1.0.md) — the v1.0
+- [`docs/STABILITY-1.0.md`](docs/STABILITY-1.0.md) — the v1.x
   stability contract (what's frozen, what can change).
 - [`docs/PLATFORM-NOTES.md`](docs/PLATFORM-NOTES.md) — per-platform
   behavior nuances (Linux/macOS/Windows).

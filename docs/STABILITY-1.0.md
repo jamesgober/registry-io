@@ -4,8 +4,9 @@ This document **is** the contract that `registry-io 1.0.0` ships under.
 It enumerates **exactly** what is frozen, **exactly** what may still
 change, and the mechanics by which any of that changes again.
 
-> Status: **in effect** as of v1.0.0. Anything in here that later needs
-> to be broken requires a **MAJOR** version increment (2.0.0).
+> Status: **in effect** as of v1.0.0 and covers every 1.x release
+> (current: v1.1.0). Anything in here that later needs to be broken
+> requires a **MAJOR** version increment (2.0.0).
 
 For the milestone plan see [`.dev/ROADMAP.md`](../.dev/ROADMAP.md). For the
 performance guarantees that back the API see [`PERFORMANCE.md`](./PERFORMANCE.md).
@@ -57,6 +58,18 @@ ships as v2.0.0.
 | `AsyncHandlerGuard::id`           | fn     |                                      |
 | `AsyncHandlerGuard::forget`       | fn     |                                      |
 
+#### Added in 1.1.0
+
+Additive under the "New methods on existing types" rule below. From
+v1.1.0 on, these are frozen on the same terms as the table above.
+
+| Item                                | Kind | Notes                                  |
+|-------------------------------------|------|----------------------------------------|
+| `SyncRegistry::unregister_and_wait` | fn   | blocking; not for async code           |
+| `SyncRegistry::clear_and_wait`      | fn   | blocking; not for async code           |
+| `SyncRegistry::register_once`       | fn   | requires `Arc<Self>`; `FnOnce` handler |
+| `SyncRegistry::panic_count`         | fn   | `-> u64`                               |
+
 #### Behavioral guarantees
 
 - **`SyncRegistry::notify` is lock-free and allocation-free** on the
@@ -79,6 +92,20 @@ ships as v2.0.0.
 - **`Send + Sync`**. `SyncRegistry<E>`, `HandlerGuard<E>`,
   `AsyncRegistry<E>`, and `AsyncHandlerGuard<E>` are all `Send + Sync`
   for any `E: Send + Sync + 'static`.
+- **`unregister_and_wait` / `clear_and_wait`** *(since 1.1.0)*. When
+  `unregister_and_wait(id)` returns `true`, the handler is not running
+  on any thread other than the caller's (when called from inside a
+  handler, frames further up the caller's own stack are not waited
+  for), and it never runs again. It returns `false` without waiting
+  when `id` is not registered. `clear_and_wait` gives the same
+  guarantee for every handler it removes. The wait may be longer than
+  strictly necessary, never shorter.
+- **`register_once`** *(since 1.1.0)*. The handler runs at most once,
+  even under concurrent `notify` calls, and is unregistered after it
+  runs or panics. It does not keep the registry alive.
+- **`panic_count`** *(since 1.1.0)*. Counts every handler panic caught
+  by `SyncRegistry::notify`, whether or not an `on_panic` callback is
+  installed.
 
 #### Trait implementations
 
@@ -120,10 +147,12 @@ disable an item exposed by another feature.
 The numbers in [`PERFORMANCE.md`](./PERFORMANCE.md) define the *upper
 bound* on dispatch latency. v1.x does **not** regress past any of:
 
-- Sync notify, 1 handler, 1 thread — `<20 ns` (measured: 10.1 ns)
-- Sync notify, 16 handlers, 1 thread — `<200 ns` (measured: 26.0 ns)
-- Sync notify, 4 handlers, 16 threads contended — `<50 ns` (measured: 24.7 ns)
-- Async notify (concurrent), 1 handler — `<500 ns` (measured: 177 ns)
+- Sync notify, 1 handler, 1 thread — `<20 ns` (measured in 1.1.0: 6.4 ns)
+- Sync notify, 16 handlers, 1 thread — `<200 ns` (measured in 1.1.0: 24.8 ns)
+- Sync notify, 4 handlers, 16 threads contended — `<50 ns` (measured
+  in 1.1.0: 37.2 ns in `contention/notify`, where every handler also
+  writes a counter shared by all threads; 0.69 ns in `pure_read`)
+- Async notify (concurrent), 1 handler — `<500 ns` (measured in 1.1.0: 41 ns)
 - **Zero heap allocations** on the sync notify no-panic path
   (verified by `tests/zero_alloc.rs`)
 
@@ -149,11 +178,13 @@ without a major version bump.
 ### Implementation details
 
 - The internal representation of `HandlerId` (currently `u64`).
-- The internal storage layout (`ArcSwap<Vec<HandlerEntry<E>>>`).
+- The internal storage layout and the synchronization behind it. Since
+  1.1.0 this is a hazard-protected snapshot cell (`SnapCell`) with a
+  process-wide hazard domain; neither is part of the contract.
 - The exact algorithm used for priority-sorted insertion.
 - The set of trait bounds on internal types.
-- Whether `notify` uses `JoinAll` for the async case or some equivalent
-  combinator.
+- How async `notify` drives handler futures concurrently (an internal
+  combinator through 1.0, in-place polling since 1.1.0).
 - Internal allocation patterns on slow paths — provided the public
   hot-path zero-allocation guarantee holds.
 
@@ -162,9 +193,11 @@ contract support.
 
 ### Dependencies
 
-- `arc-swap` may receive minor/patch bumps with no semver impact on
-  registry-io.
-- `futures-core` is **reserved**; not currently used directly.
+- With default features the crate has **no runtime dependencies**
+  (since 1.1.0).
+- `futures-core` (optional, behind the `async` feature) is
+  **reserved**; not currently used directly. It may receive
+  minor/patch bumps with no semver impact on registry-io.
 - New dependencies may be added behind opt-in features.
 - The `[dev-dependencies]` set may change freely.
 
@@ -253,4 +286,4 @@ stable crate is higher than any single feature.
 
 ---
 
-<sub>registry-io v1.0.0 — Copyright © 2026 James Gober. Apache-2.0 OR MIT.</sub>
+<sub>registry-io v1.1.0 — Copyright © 2026 James Gober. Apache-2.0 OR MIT.</sub>

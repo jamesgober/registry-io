@@ -13,13 +13,15 @@
 //! within a small constant of its baseline. If even one closure leaked
 //! per cycle we would see a strong count in the thousands.
 //!
-//! A small per-thread slack (`<= 4`) is permitted because `arc-swap`
-//! retains a thread-local cache of the last-seen `Arc<Vec<...>>` to
-//! make `load()` cheaper. That cached snapshot is reclaimed on the next
-//! load that observes a different generation, but the test thread can
-//! end its iteration with one snapshot still cached. The canary count
-//! therefore bounds total leakage at "essentially constant", not "0".
+//! A small slack (`<= 4`) is permitted for retired handler lists. When a
+//! write replaces the list, the old list is freed by that write unless
+//! some thread still announces it as in use; such a list is freed by the
+//! last reader that was using it, or by the next write. In this
+//! single-threaded test nothing should remain retired, so the slack is
+//! only a margin. The canary count therefore bounds total leakage at
+//! "essentially constant", not "0".
 
+#![cfg(feature = "sync")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::sync::Arc;
@@ -46,9 +48,9 @@ fn register_unregister_churn_does_not_leak_handler_closures() {
         );
     }
 
-    // One final no-op operation to give arc-swap's TLS cache a chance to
-    // observe the latest empty-vec generation. Without this, the test
-    // thread may still hold one stale snapshot from inside the loop.
+    // One final read. If any retired handler list were still pending, a
+    // reader that finds the retired list non-empty tries to free every
+    // list no thread is still using.
     let _ = registry.handler_count();
 
     let final_count = Arc::strong_count(&canary);
@@ -73,7 +75,7 @@ fn clear_drops_all_handler_closures() {
     assert!(Arc::strong_count(&canary) >= 101);
 
     registry.clear();
-    let _ = registry.handler_count(); // flush TLS cache
+    let _ = registry.handler_count(); // lets a reader free any retired list
 
     let final_count = Arc::strong_count(&canary);
     assert!(

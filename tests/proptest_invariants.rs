@@ -14,6 +14,7 @@
 //!    `handler_count` consistent with the (issued - removed) bookkeeping
 //!    that the test maintains alongside.
 
+#![cfg(feature = "sync")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::HashSet;

@@ -1,6 +1,6 @@
 [package]
 name = "registry-io"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 rust-version = "1.85"
 readme = "README.md"
@@ -62,9 +62,6 @@ metrics = []
 dhat-heap = []
 
 [dependencies]
-# Lock-free atomic snapshot updates of the handler list.
-arc-swap = "1.7"
-
 # Reserved for AsyncRegistry (>= 0.5.0). Pulled in only when the `async`
 # feature is enabled.
 futures-core = { version = "0.3", optional = true, default-features = false }
@@ -81,10 +78,12 @@ proptest = { version = "1", default-features = false, features = ["std"] }
 [[bench]]
 name = "sync_notify"
 harness = false
+required-features = ["sync"]
 
 [[bench]]
 name = "register_unregister"
 harness = false
+required-features = ["sync"]
 
 [[bench]]
 name = "async_notify"
@@ -94,6 +93,43 @@ required-features = ["async"]
 [[bench]]
 name = "contention"
 harness = false
+required-features = ["sync"]
+
+[[example]]
+name = "basic"
+required-features = ["sync"]
+
+[[example]]
+name = "concurrent"
+required-features = ["sync"]
+
+[[example]]
+name = "guards"
+required-features = ["sync"]
+
+[[example]]
+name = "panic_isolation"
+required-features = ["sync"]
+
+[[example]]
+name = "pattern_audit_fanout"
+required-features = ["sync"]
+
+[[example]]
+name = "pattern_hot_reload"
+required-features = ["sync"]
+
+[[example]]
+name = "pattern_metric_event"
+required-features = ["sync"]
+
+[[example]]
+name = "pattern_transaction_hooks"
+required-features = ["sync"]
+
+[[example]]
+name = "priority"
+required-features = ["sync"]
 
 [[example]]
 name = "async_basic"

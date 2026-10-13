@@ -34,17 +34,27 @@ apart); the *number of subscribers* is high (tens to hundreds).
 **Solution shape.**
 
 ```text
-Config { snapshot: ArcSwap<Snapshot>, on_change: Arc<SyncRegistry<Snapshot>> }
+Config { snapshot: RwLock<Arc<Snapshot>>, on_change: Arc<SyncRegistry<Snapshot>> }
 
 config.mutate(|snap| snap.field = new) {
-    // 1. Atomically swap the new snapshot into ArcSwap.
-    // 2. Call on_change.notify(&new_snapshot) — fans out to every subscriber.
+    // 1. Build the new snapshot and store it (brief write lock).
+    // 2. Release the lock, then call on_change.notify(&new_snapshot)
+    //    — fans out to every subscriber.
 }
 
 subscriber.register(move |snap: &Snapshot| {
     // Re-derive subscriber-local state from snap.
 });
 ```
+
+The pattern does not depend on how the current snapshot is stored.
+The example uses `RwLock<Arc<Snapshot>>`: readers take a brief read
+lock and clone the `Arc`, which is cheap at configuration-change
+rates. Any snapshot storage works, including an atomically swappable
+`Arc` from another crate if reads of the current config are themselves
+on a hot path. Notify after releasing the write lock: a subscriber that
+reads the current config from inside its handler would otherwise
+deadlock on it.
 
 **Why a registry beats the obvious alternatives.**
 
@@ -82,7 +92,7 @@ struct CounterSink  { _guard: HandlerGuard<AuditEvent>, /* … */ }
 // Dropping the sink drops the guard, which deregisters cleanly.
 
 audit_producer.emit(event) {
-    bus.notify(&event);  // ~12 ns for 4 handlers
+    bus.notify(&event);  // ~9 ns for 4 handlers
 }
 ```
 
@@ -181,8 +191,8 @@ tx_mgr.commit(txid) { bus.notify(&TransactionEvent{ txid, transition: Committed 
   one event; the registry orders the handlers.
 - **Stable within priority bucket.** Two handlers at priority `500`
   run in the order they were registered.
-- **Single dispatch, single allocation-free call.** Even with 5
-  handlers, dispatch lands at ~15 ns.
+- **Single dispatch, single allocation-free call.** With 4 handlers,
+  dispatch overhead is under 9 ns.
 
 **Runnable example:**
 [`examples/pattern_transaction_hooks.rs`](../examples/pattern_transaction_hooks.rs).
@@ -199,11 +209,12 @@ tx_mgr.commit(txid) { bus.notify(&TransactionEvent{ txid, transition: Committed 
 | Anything `.await`-able you want to run **in order**     | `AsyncRegistry::notify_sequential` |
 | Network I/O directly                                   | Async **or** offload from sync     |
 
-The performance gap is real: sync `notify` is ~10 ns per handler;
-async concurrent dispatch is ~180 ns for 1 handler (dominated by the
-boxed-future allocation). If your handlers are *async-fn* but never
-actually `.await` real work, prefer `notify_sequential` over `notify`
-— it skips the `JoinAll` allocation and lands at ~53 ns / 1 handler.
+The performance gap is real: sync `notify` is ~6 ns with 1 handler
+and allocates nothing; async concurrent dispatch is ~41 ns for 1
+handler (dominated by the boxed-future allocation) and ~500 ns for 16.
+If your handlers are *async-fn* but never actually `.await` real work,
+prefer `notify_sequential` over `notify` — it needs no join state and
+lands at ~35 ns / 1 handler.
 
 See [`PERFORMANCE.md`](./PERFORMANCE.md#choosing-a-dispatch-mode) for
 measured numbers.
@@ -225,6 +236,11 @@ measured numbers.
 - **Capturing megabytes in a closure.** Each registration becomes an
   `Arc<dyn Fn>` heap allocation that owns its captures. Capture an
   `Arc<T>` to share, not a `T` by value, when `T` is large.
+- **Tearing down a handler's resources right after `unregister`.**
+  A `notify` already running on another thread may still be inside
+  the handler. If the handler touches something you are about to
+  close or free, call `unregister_and_wait` (or `clear_and_wait`)
+  first. Both block, so keep them out of async code.
 - **Re-using a `HandlerId` across registries.** Ids are unique within
   their issuing registry only. The numbers can collide between
   registries; never feed an id from registry A into registry B's
@@ -232,4 +248,4 @@ measured numbers.
 
 ---
 
-<sub>registry-io v1.0.0 — Copyright © 2026 James Gober. Apache-2.0 OR MIT.</sub>
+<sub>registry-io v1.1.0 — Copyright © 2026 James Gober. Apache-2.0 OR MIT.</sub>
