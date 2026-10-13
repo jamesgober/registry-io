@@ -2,7 +2,12 @@
 //!
 //! Sweeps `1, 4, 16, 64` concurrent notifiers against a fixed handler set,
 //! measuring per-notify wall-clock time under contended reads of the
-//! lock-free `ArcSwap` snapshot.
+//! hazard-protected handler list.
+//!
+//! Two groups: `contention/notify` (every handler increments one shared
+//! counter, so it largely measures that counter's cache-line contention)
+//! and `pure_read/notify` (handlers do no shared writes, isolating the
+//! registry's own read scaling).
 //!
 //! Run with: `cargo bench --bench contention`
 //!
@@ -55,5 +60,40 @@ fn bench_contended_notify(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, bench_contended_notify);
+/// Same sweep, but handlers do no shared writes, so the numbers reflect
+/// the registry's own read-side scaling rather than cache-line contention
+/// on a counter that every handler increments.
+fn bench_pure_read_notify(c: &mut Criterion) {
+    for thread_count in [1usize, 4, 16, 64].iter().copied() {
+        for handler_count in [1usize, 4, 16].iter().copied() {
+            let registry = Arc::new(SyncRegistry::<u64>::new());
+            for _ in 0..handler_count {
+                let _ = registry.register(move |value| {
+                    let _ = black_box(*value);
+                });
+            }
+
+            let label = format!("pure_read/notify/{thread_count}_threads/{handler_count}_handlers");
+            let _ = c.bench_function(&label, |b| {
+                b.iter_custom(|iters| {
+                    let per_thread = iters / thread_count as u64;
+                    let start = Instant::now();
+                    thread::scope(|s| {
+                        for _ in 0..thread_count {
+                            let r = Arc::clone(&registry);
+                            let _ = s.spawn(move || {
+                                for _ in 0..per_thread {
+                                    r.notify(black_box(&1_u64));
+                                }
+                            });
+                        }
+                    });
+                    start.elapsed()
+                });
+            });
+        }
+    }
+}
+
+criterion_group!(benches, bench_contended_notify, bench_pure_read_notify);
 criterion_main!(benches);

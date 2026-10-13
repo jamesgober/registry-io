@@ -175,8 +175,8 @@ impl fmt::Debug for PanicInfo<'_> {
 /// Internal alias for the type-erased panic callback function type.
 pub(crate) type PanicCallback = dyn Fn(&PanicInfo<'_>) + Send + Sync + 'static;
 
-/// Sized holder for an `Arc<dyn Fn>` panic callback, so it can be stored in
-/// [`arc_swap::ArcSwapOption`] (which requires `T: Sized`).
+/// Sized holder for an `Arc<dyn Fn>` panic callback, stored behind an
+/// `Arc` in the registry's panic-callback slot.
 pub(crate) struct PanicCallbackHolder {
     inner: Arc<PanicCallback>,
 }

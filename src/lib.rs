@@ -13,9 +13,10 @@
 //!   calling thread, with sub-microsecond dispatch overhead.
 //! - **Lock-free reads.** Multiple threads can fire [`SyncRegistry::notify`]
 //!   concurrently without serialization.
-//! - **Zero allocation on the hot path.** `notify` walks an
-//!   [`arc_swap::ArcSwap`] snapshot of `Arc<dyn Fn>` pointers and dispatches
-//!   each one — no allocations along the no-panic path.
+//! - **Zero allocation on the hot path.** `notify` borrows a
+//!   hazard-protected snapshot of the handler list in place and dispatches
+//!   each handler — no allocation, no lock, and no reference-count traffic
+//!   along the no-panic path.
 //! - **Panic isolation.** A panic in one handler is caught and does **not**
 //!   stop sibling handlers or propagate to the caller.
 //! - **Priority ordering.** Handlers may be registered with a priority value;
@@ -64,7 +65,7 @@
 //!
 //! Dual-licensed under Apache-2.0 OR MIT.
 
-#![doc(html_root_url = "https://docs.rs/registry-io/1.0.0")]
+#![doc(html_root_url = "https://docs.rs/registry-io/1.1.0")]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(not(feature = "std"), no_std)]
 #![deny(missing_docs)]
@@ -92,6 +93,12 @@ mod handler_id;
 
 #[cfg(any(feature = "sync", feature = "async"))]
 mod panic;
+
+#[cfg(any(feature = "sync", feature = "async"))]
+mod hazard;
+
+#[cfg(any(feature = "sync", feature = "async"))]
+mod snapshot;
 
 #[cfg(feature = "async")]
 mod future_ext;
