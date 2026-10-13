@@ -478,32 +478,54 @@ mod tests {
 
     #[test]
     fn concurrent_readers_and_writers_never_observe_freed_values() {
+        const READERS: usize = 4;
         let cell = Arc::new(SnapCell::new(vec![0u64; 16]));
         let stop = Arc::new(AtomicBool::new(false));
-        let readers: Vec<_> = (0..4)
+        // Each reader bumps `started` after its first read and
+        // `overlapped` after its first read that saw a written value, so
+        // the writer can guarantee real overlap however slowly the OS
+        // schedules reader threads (CI runners may have two cores).
+        let started = Arc::new(AtomicUsize::new(0));
+        let overlapped = Arc::new(AtomicUsize::new(0));
+        let readers: Vec<_> = (0..READERS)
             .map(|_| {
                 let (cell, stop) = (Arc::clone(&cell), Arc::clone(&stop));
+                let (started, overlapped) = (Arc::clone(&started), Arc::clone(&overlapped));
                 std::thread::spawn(move || {
                     let mut reads = 0u64;
-                    while !stop.load(Ordering::Relaxed) {
-                        cell.read(|v| {
+                    let mut saw_write = false;
+                    while !stop.load(Ordering::SeqCst) {
+                        let first = cell.read(|v| {
                             let first = v[0];
                             assert!(v.iter().all(|x| *x == first), "torn snapshot");
+                            first
                         });
+                        if reads == 0 {
+                            let _ = started.fetch_add(1, Ordering::SeqCst);
+                        }
+                        if first != 0 && !saw_write {
+                            saw_write = true;
+                            let _ = overlapped.fetch_add(1, Ordering::SeqCst);
+                        }
                         reads += 1;
                     }
                     reads
                 })
             })
             .collect();
-        let writes = if cfg!(miri) { 40 } else { 2000u64 };
-        for i in 1..writes {
+        while started.load(Ordering::SeqCst) < READERS {
+            std::thread::yield_now();
+        }
+        let min_writes = if cfg!(miri) { 40 } else { 2000u64 };
+        let mut i = 0u64;
+        while i < min_writes || overlapped.load(Ordering::SeqCst) < READERS {
+            i += 1;
             cell.replace(vec![i; 16]);
         }
-        stop.store(true, Ordering::Relaxed);
+        stop.store(true, Ordering::SeqCst);
         for r in readers {
             assert!(r.join().unwrap() > 0);
         }
-        cell.read(|v| assert_eq!(v[0], writes - 1));
+        cell.read(|v| assert_eq!(v[0], i));
     }
 }
