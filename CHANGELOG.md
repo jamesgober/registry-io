@@ -563,7 +563,7 @@ Hardening milestone. Property-based invariant testing,
 ## [0.6.0] - 2026-05-19
 
 Performance verification milestone. The full benchmark suite has been
-executed, the Performance Contract numbers from `.dev/ROADMAP.md` are
+executed, the Performance Contract numbers are
 **all met with significant headroom**, and the zero-allocation property
 of `SyncRegistry::notify` is verified by a `dhat`-backed test.
 

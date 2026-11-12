@@ -1,4 +1,4 @@
-//! Pattern: **transaction state-change hooks** (DISTRO-style).
+//! Pattern: **transaction state-change hooks**.
 //!
 //! A transaction transitions through `Begun → Prepared → Committed |
 //! Aborted | RecoveredFromCrash`. Each transition needs to fire hooks

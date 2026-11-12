@@ -8,7 +8,7 @@ change, and the mechanics by which any of that changes again.
 > (current: v1.1.0). Anything in here that later needs to be broken
 > requires a **MAJOR** version increment (2.0.0).
 
-For the milestone plan see [`.dev/ROADMAP.md`](../.dev/ROADMAP.md). For the
+For the
 performance guarantees that back the API see [`PERFORMANCE.md`](./PERFORMANCE.md).
 
 ---

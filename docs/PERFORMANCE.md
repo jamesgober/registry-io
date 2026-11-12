@@ -4,8 +4,8 @@ Measured performance characteristics for `registry-io 1.1.0`, compared
 against a fresh baseline run of the 1.0.0 code, plus the cost model,
 methodology, and reproducibility notes.
 
-The performance contract for `1.0.0` lives in `.dev/ROADMAP.md` and is
-restated in [`STABILITY-1.0.md`](./STABILITY-1.0.md#performance-contract).
+The performance contract for `1.0.0` is stated in
+[`STABILITY-1.0.md`](./STABILITY-1.0.md#performance-contract).
 Every number below is **measured**, not extrapolated.
 
 ---
