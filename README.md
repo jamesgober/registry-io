@@ -291,7 +291,6 @@ for the full reference.
   stability contract (what's frozen, what can change).
 - [`docs/PLATFORM-NOTES.md`](docs/PLATFORM-NOTES.md) — per-platform
   behavior nuances (Linux/macOS/Windows).
-- [`.dev/ROADMAP.md`](.dev/ROADMAP.md) — milestone plan to 1.0.
 - [`CHANGELOG.md`](CHANGELOG.md) — release history.
 
 ---

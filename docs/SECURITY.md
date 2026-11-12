@@ -112,8 +112,7 @@ The crate has **no runtime dependencies** under any feature set (since
 
 ## Panic isolation in detail
 
-The directive in `.dev/DIRECTIVES.md` makes panic isolation a hard
-requirement. Implementation:
+Panic isolation is a hard requirement. Implementation:
 
 ```rust
 // src/sync/mod.rs, in notify():
