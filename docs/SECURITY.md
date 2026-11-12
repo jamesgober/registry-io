@@ -97,15 +97,16 @@ Miri found two bugs during development. Both were fixed before release:
 Miri runs are not part of the per-push CI matrix (they need nightly and
 take much longer than the regular suite). They were run for the 1.1.0
 release and should be repeated for any change to `src/hazard.rs` or
-`src/snapshot.rs`.
+`src/snapshot.rs`. Loom models of the handshake
+(`tests/loom_handshake.rs`, written in the equivalent `SeqCst`-fence
+form that loom checks exactly) run in CI.
 
 ### Dependencies
 
-With default features the crate has **no runtime dependencies**; only
-`std` (part of the trusted base) is used. The `async` feature adds the
-optional `futures-core` dependency, which is declared but not
-currently imported. Dev-dependencies (`criterion`, `tokio`, `dhat`,
-`proptest`) do not reach downstream crates.
+The crate has **no runtime dependencies** under any feature set (since
+1.2.0, which dropped the unused optional `futures-core`); only `std`
+(part of the trusted base) is used. Dev-dependencies (`criterion`,
+`tokio`, `dhat`, `proptest`, `loom`) do not reach downstream crates.
 
 ---
 

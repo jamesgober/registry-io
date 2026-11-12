@@ -1,6 +1,6 @@
 [package]
 name = "registry-io"
-version = "1.1.0"
+version = "1.2.0"
 edition = "2024"
 rust-version = "1.85"
 readme = "README.md"
@@ -47,9 +47,8 @@ std = []
 # `sync` enables the SyncRegistry and all synchronous-side machinery (priority,
 # guards, panic isolation). Implies `std`.
 sync = ["std"]
-# `async` enables the AsyncRegistry. Reserved for a future release (>= 0.5.0).
-# Implies `std`.
-async = ["std", "dep:futures-core"]
+# `async` enables the AsyncRegistry. Implies `std`.
+async = ["std"]
 # `hybrid` activates both sync and async paths.
 hybrid = ["sync", "async"]
 
@@ -61,10 +60,8 @@ metrics = []
 # allocator with `dhat::Alloc`, which would skew unrelated benchmarks.
 dhat-heap = []
 
+# No runtime dependencies under any feature set.
 [dependencies]
-# Reserved for AsyncRegistry (>= 0.5.0). Pulled in only when the `async`
-# feature is enabled.
-futures-core = { version = "0.3", optional = true, default-features = false }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
@@ -74,6 +71,14 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"
 dhat = "0.3"
 # Property-based invariant verification (`tests/proptest_invariants.rs`).
 proptest = { version = "1", default-features = false, features = ["std"] }
+
+# Model checker for the hazard-pointer handshake. Only resolved for
+# `RUSTFLAGS="--cfg loom" cargo test --release --test loom_handshake`.
+[target.'cfg(loom)'.dev-dependencies]
+loom = "0.7"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }
 
 [[bench]]
 name = "sync_notify"

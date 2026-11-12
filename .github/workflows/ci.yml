@@ -48,3 +48,14 @@ jobs:
       - run: cargo doc --no-deps --all-features
         env:
           RUSTDOCFLAGS: "-D warnings"
+
+  loom:
+    name: Loom (hazard-pointer handshake)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --release --test loom_handshake
+        env:
+          RUSTFLAGS: "--cfg loom -D warnings"
+          LOOM_MAX_PREEMPTIONS: "4"

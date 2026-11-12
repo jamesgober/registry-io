@@ -22,6 +22,33 @@ use crate::snapshot::SnapCell;
 pub mod guard;
 pub use guard::HandlerGuard;
 
+/// What [`SyncRegistry::try_unregister_and_wait`] did.
+///
+/// # Examples
+///
+/// ```
+/// use registry_io::{SyncRegistry, WaitOutcome};
+///
+/// let registry: SyncRegistry<()> = SyncRegistry::new();
+/// let id = registry.register(|_| {});
+/// assert_eq!(registry.try_unregister_and_wait(id), WaitOutcome::Waited);
+/// assert_eq!(registry.try_unregister_and_wait(id), WaitOutcome::NotRegistered);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum WaitOutcome {
+    /// The handler was removed, and no other thread is running it.
+    Waited,
+    /// No handler with that id was registered; nothing was waited for.
+    NotRegistered,
+    /// The handler was removed, but the call came from inside a handler of
+    /// this registry while another thread was doing the same. Each would
+    /// wait for the other's dispatch to finish, for ever, so that thread
+    /// was not waited for: until its dispatch returns, it may still run the
+    /// removed handler. Every other thread was waited for.
+    WouldDeadlock,
+}
+
 /// A boxed handler closure stored inside the registry.
 type StoredHandler<E> = Arc<dyn Fn(&E) + Send + Sync + 'static>;
 
@@ -345,6 +372,18 @@ impl<E: Send + Sync + 'static> SyncRegistry<E> {
     /// to one millisecond. Do not call it from async code; use
     /// [`unregister`](Self::unregister) there.
     ///
+    /// # Calling it from a handler
+    ///
+    /// Supported. One case cannot be waited for: when handlers on two
+    /// threads call it (or [`clear_and_wait`](Self::clear_and_wait)) at
+    /// the same time, each thread is inside a dispatch the other waits
+    /// for. Up to 1.1 both blocked for ever. Now a call made from inside a
+    /// handler does not wait for another thread that is blocked the same
+    /// way, so both return; that thread may still run the removed handler
+    /// until its own dispatch returns. Use
+    /// [`try_unregister_and_wait`](Self::try_unregister_and_wait) to find
+    /// out whether that happened.
+    ///
     /// # Examples
     ///
     /// ```
@@ -363,11 +402,42 @@ impl<E: Send + Sync + 'static> SyncRegistry<E> {
     /// registry.notify(&());
     /// ```
     pub fn unregister_and_wait(&self, id: HandlerId) -> bool {
-        let removed = self.remove_id(id);
-        if removed {
-            self.handlers.wait_for_retired_readers();
+        self.try_unregister_and_wait(id) != WaitOutcome::NotRegistered
+    }
+
+    /// [`unregister_and_wait`](Self::unregister_and_wait), reporting
+    /// whether the wait covered every thread.
+    ///
+    /// Returns [`WaitOutcome::WouldDeadlock`] when the call came from
+    /// inside a handler of this registry and another thread, also inside a
+    /// handler of this registry, was blocked in the same kind of wait:
+    /// waiting for it would have blocked both threads for ever. The
+    /// handler is removed in that case too, but that thread may still run
+    /// it until its dispatch returns.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use registry_io::{SyncRegistry, WaitOutcome};
+    ///
+    /// let registry: SyncRegistry<()> = SyncRegistry::new();
+    /// let id = registry.register(|_| {});
+    /// match registry.try_unregister_and_wait(id) {
+    ///     WaitOutcome::Waited => { /* safe to tear down what the handler used */ }
+    ///     WaitOutcome::WouldDeadlock => { /* another handler thread may still run it */ }
+    ///     WaitOutcome::NotRegistered => { /* already gone */ }
+    ///     _ => {}
+    /// }
+    /// ```
+    pub fn try_unregister_and_wait(&self, id: HandlerId) -> WaitOutcome {
+        if !self.remove_id(id) {
+            return WaitOutcome::NotRegistered;
         }
-        removed
+        if self.handlers.wait_for_retired_readers() {
+            WaitOutcome::Waited
+        } else {
+            WaitOutcome::WouldDeadlock
+        }
     }
 
     /// Removes the entry with `id` in one swap. Ids are unique, so the
@@ -432,7 +502,7 @@ impl<E: Send + Sync + 'static> SyncRegistry<E> {
     /// ```
     pub fn clear_and_wait(&self) {
         if self.remove_all() {
-            self.handlers.wait_for_retired_readers();
+            let _complete = self.handlers.wait_for_retired_readers();
         }
     }
 
@@ -719,9 +789,12 @@ impl<E: Send + Sync + 'static> SyncRegistry<E> {
             // If the user's panic callback itself panics, swallow the
             // second-order panic. Recursion into our own machinery is
             // explicitly not supported.
-            drop(catch_unwind(AssertUnwindSafe(|| holder.invoke(&info))));
+            if let Err(nested) = catch_unwind(AssertUnwindSafe(|| holder.invoke(&info))) {
+                crate::panic::drop_payload(nested);
+            }
         }
-        drop(payload);
+        // A payload whose `Drop` panics must not escape `notify`.
+        crate::panic::drop_payload(payload);
     }
 }
 

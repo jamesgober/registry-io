@@ -162,3 +162,82 @@ fn panics_do_not_disturb_handler_count() {
     // No handler is auto-unregistered on panic.
     assert_eq!(registry.handler_count(), 3);
 }
+
+/// A panic payload whose `Drop` panics again.
+struct DropBomb;
+
+impl Drop for DropBomb {
+    fn drop(&mut self) {
+        panic!("intentional: payload drop");
+    }
+}
+
+fn quiet_panics() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let default = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let payload = info.payload();
+            let message = payload
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
+            let intentional =
+                message.is_some_and(|m| m.starts_with("intentional")) || payload.is::<DropBomb>();
+            if !intentional {
+                default(info);
+            }
+        }));
+    });
+}
+
+// Review F-3 (1.1.0): the caught payload was dropped outside any
+// `catch_unwind`, so a payload whose `Drop` panics escaped `notify` and
+// the handlers after it never ran.
+#[test]
+fn payload_with_panicking_drop_does_not_escape_notify() {
+    quiet_panics();
+    let registry: SyncRegistry<()> = SyncRegistry::new();
+    let later = Arc::new(AtomicUsize::new(0));
+    let _first = registry.register_with_priority(10, |_| panic_any(DropBomb));
+    let sink = Arc::clone(&later);
+    let _second = registry.register(move |_| {
+        let _previous = sink.fetch_add(1, Ordering::SeqCst);
+    });
+    let escaped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        registry.notify(&());
+    }))
+    .is_err();
+    assert!(!escaped, "the payload's Drop panic escaped notify");
+    assert_eq!(
+        later.load(Ordering::SeqCst),
+        1,
+        "the next handler was skipped"
+    );
+    assert_eq!(registry.panic_count(), 1);
+}
+
+// Review F-3 (1.1.0): a handler that unregisters itself is freed by the
+// notifying thread on its way out of the dispatch; a panicking `Drop` in
+// its captured state escaped `notify`.
+#[test]
+fn panicking_drop_of_a_self_unregistered_handler_does_not_escape_notify() {
+    quiet_panics();
+    let registry: Arc<SyncRegistry<()>> = Arc::new(SyncRegistry::new());
+    let own_id: Arc<std::sync::OnceLock<registry_io::HandlerId>> =
+        Arc::new(std::sync::OnceLock::new());
+    let weak = Arc::downgrade(&registry);
+    let cell = Arc::clone(&own_id);
+    let bomb = DropBomb;
+    let id = registry.register(move |_| {
+        let _keep = &bomb;
+        let _removed = weak.upgrade().unwrap().unregister(*cell.get().unwrap());
+    });
+    own_id.set(id).unwrap();
+    let escaped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        registry.notify(&());
+    }))
+    .is_err();
+    assert!(!escaped, "the capture's Drop panic escaped notify");
+    assert!(registry.is_empty());
+}

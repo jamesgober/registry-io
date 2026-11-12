@@ -1,10 +1,11 @@
 //! Opaque handler identifier returned by registration.
 //!
 //! Each registration produces a [`HandlerId`] that the caller can use to
-//! later unregister the handler. Ids are unique within the registry that
-//! issued them and are not portable across registries.
+//! later unregister the handler. Ids come from one process-wide counter,
+//! so no two registries ever issue the same id.
 
 use core::fmt;
+#[cfg(any(feature = "sync", feature = "async"))]
 use core::sync::atomic::{AtomicU64, Ordering};
 
 /// Opaque identifier for a registered handler.
@@ -19,9 +20,10 @@ use core::sync::atomic::{AtomicU64, Ordering};
 ///
 /// # Uniqueness
 ///
-/// Ids are unique **within the registry that issued them**, for the lifetime
-/// of that registry. Two registries may issue the same numeric id; never use
-/// an id with a registry other than the one that returned it.
+/// Ids are unique **across every registry in the process** (since 1.2.0;
+/// before, each registry counted from 1). An id passed to a registry that
+/// did not issue it matches no handler there, so `unregister` returns
+/// `false` instead of removing an unrelated handler.
 ///
 /// # Examples
 ///
@@ -45,6 +47,7 @@ impl HandlerId {
     /// Internal: only the id generator should call this. The numeric domain
     /// is otherwise opaque.
     #[inline]
+    #[cfg_attr(not(any(feature = "sync", feature = "async")), allow(dead_code))]
     pub(crate) const fn from_raw(raw: u64) -> Self {
         Self(raw)
     }
@@ -84,34 +87,42 @@ impl fmt::Display for HandlerId {
     }
 }
 
-/// Atomic counter that issues unique [`HandlerId`]s for one registry.
+#[cfg(any(feature = "sync", feature = "async"))]
+/// The process-wide id counter. Shared by every registry, so an id is
+/// never valid in two registries at once.
+static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Issues unique [`HandlerId`]s for one registry, from the process-wide
+/// counter.
 ///
 /// Uses `Ordering::Relaxed` because uniqueness only requires atomicity of
 /// the fetch-and-add itself; no other memory state is ordered against the
-/// id allocation.
+/// id allocation. At one id per nanosecond the 64-bit counter lasts more
+/// than 500 years.
+#[cfg(any(feature = "sync", feature = "async"))]
 #[derive(Debug)]
 pub(crate) struct HandlerIdGenerator {
-    next: AtomicU64,
+    _private: (),
 }
 
+#[cfg(any(feature = "sync", feature = "async"))]
 impl HandlerIdGenerator {
-    /// Construct a new generator. The first id issued will be `1`.
+    /// Construct a new generator.
     #[inline]
     pub(crate) const fn new() -> Self {
-        Self {
-            next: AtomicU64::new(1),
-        }
+        Self { _private: () }
     }
 
     /// Issue the next unique id.
     #[inline]
+    #[allow(clippy::unused_self)] // keeps the per-registry call shape
     pub(crate) fn next(&self) -> HandlerId {
-        let raw = self.next.fetch_add(1, Ordering::Relaxed);
+        let raw = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         HandlerId::from_raw(raw)
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(feature = "sync", feature = "async")))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::{HandlerId, HandlerIdGenerator};
@@ -144,11 +155,20 @@ mod tests {
         let a = generator.next();
         let b = generator.next();
         let c = generator.next();
-        assert_eq!(a.as_u64(), 1);
-        assert_eq!(b.as_u64(), 2);
-        assert_eq!(c.as_u64(), 3);
-        assert_ne!(a, b);
-        assert_ne!(b, c);
+        assert!(a.as_u64() >= 1);
+        assert!(a.as_u64() < b.as_u64());
+        assert!(b.as_u64() < c.as_u64());
+    }
+
+    // Review F-5: every registry counted from 1, so an id passed to the
+    // wrong registry removed an unrelated handler there.
+    #[test]
+    fn two_generators_never_issue_the_same_id() {
+        let first = HandlerIdGenerator::new();
+        let second = HandlerIdGenerator::new();
+        let a: Vec<HandlerId> = (0..100).map(|_| first.next()).collect();
+        let b: Vec<HandlerId> = (0..100).map(|_| second.next()).collect();
+        assert!(a.iter().all(|id| !b.contains(id)));
     }
 
     #[test]

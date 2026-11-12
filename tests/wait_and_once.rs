@@ -301,3 +301,130 @@ fn soak_unregister_and_wait_never_runs_handler_after_return() {
     );
     assert!(registry.is_empty());
 }
+
+// Review F-1 (1.1.0): handlers on two threads that each called
+// `unregister_and_wait` while both were inside the same dispatch waited
+// for each other for ever. Both calls must return.
+#[test]
+fn unregister_and_wait_from_handlers_on_two_threads_does_not_deadlock() {
+    let registry: Arc<SyncRegistry<usize>> = Arc::new(SyncRegistry::new());
+    let targets: Arc<OnceLock<[HandlerId; 2]>> = Arc::new(OnceLock::new());
+    let barrier = Arc::new(Barrier::new(2));
+    let outcomes = Arc::new(std::sync::Mutex::new(Vec::new()));
+    {
+        let weak = Arc::downgrade(&registry);
+        let (targets, barrier, outcomes) = (
+            Arc::clone(&targets),
+            Arc::clone(&barrier),
+            Arc::clone(&outcomes),
+        );
+        let _id = registry.register(move |k: &usize| {
+            // Both threads are inside this dispatch from here on.
+            let _leader = barrier.wait();
+            let registry = weak.upgrade().unwrap();
+            let id = targets.get().unwrap()[*k];
+            let outcome = registry.try_unregister_and_wait(id);
+            outcomes.lock().unwrap().push(outcome);
+        });
+    }
+    let first = registry.register(|_| {});
+    let second = registry.register(|_| {});
+    targets.set([first, second]).unwrap();
+
+    let (tx, rx) = mpsc::channel();
+    for k in 0..2usize {
+        let (registry, tx) = (Arc::clone(&registry), tx.clone());
+        let _worker = thread::spawn(move || {
+            registry.notify(&k);
+            tx.send(k).unwrap();
+        });
+    }
+    let a = rx.recv_timeout(Duration::from_secs(10));
+    let b = rx.recv_timeout(Duration::from_secs(10));
+    assert!(a.is_ok() && b.is_ok(), "notify stuck: {a:?} {b:?}");
+    let outcomes = outcomes.lock().unwrap().clone();
+    assert_eq!(outcomes.len(), 2);
+    assert!(
+        outcomes.contains(&registry_io::WaitOutcome::WouldDeadlock),
+        "one side must report the wait it could not make: {outcomes:?}"
+    );
+    assert!(!registry.contains(first));
+    assert!(!registry.contains(second));
+}
+
+#[test]
+fn try_unregister_and_wait_reports_waited_and_not_registered() {
+    let registry: SyncRegistry<()> = SyncRegistry::new();
+    let id = registry.register(|_| {});
+    assert_eq!(
+        registry.try_unregister_and_wait(id),
+        registry_io::WaitOutcome::Waited
+    );
+    assert_eq!(
+        registry.try_unregister_and_wait(id),
+        registry_io::WaitOutcome::NotRegistered
+    );
+}
+
+// The deadlock escape must not weaken the ordinary wait: a call from a
+// handler still waits for another thread that is merely dispatching.
+#[test]
+fn unregister_and_wait_from_a_handler_still_waits_for_plain_dispatches() {
+    let registry: Arc<SyncRegistry<u32>> = Arc::new(SyncRegistry::new());
+    let entered = Arc::new(AtomicBool::new(false));
+    let release = Arc::new(AtomicBool::new(false));
+    let finished = Arc::new(AtomicBool::new(false));
+    let slow = {
+        let (entered, release, finished) = (
+            Arc::clone(&entered),
+            Arc::clone(&release),
+            Arc::clone(&finished),
+        );
+        registry.register(move |v| {
+            if *v == 1 {
+                entered.store(true, Ordering::SeqCst);
+                while !release.load(Ordering::SeqCst) {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                finished.store(true, Ordering::SeqCst);
+            }
+        })
+    };
+    let blocker = {
+        let registry = Arc::clone(&registry);
+        thread::spawn(move || registry.notify(&1))
+    };
+    while !entered.load(Ordering::SeqCst) {
+        thread::yield_now();
+    }
+    let outcome = Arc::new(std::sync::Mutex::new(None));
+    {
+        let weak = Arc::downgrade(&registry);
+        let (outcome, finished) = (Arc::clone(&outcome), Arc::clone(&finished));
+        let _id = registry.register_once(move |_: &u32| {
+            let registry = weak.upgrade().unwrap();
+            let result = registry.try_unregister_and_wait(slow);
+            assert!(
+                finished.load(Ordering::SeqCst),
+                "returned before the dispatch ended"
+            );
+            *outcome.lock().unwrap() = Some(result);
+        });
+    }
+    let waiter = {
+        let registry = Arc::clone(&registry);
+        thread::spawn(move || registry.notify(&2))
+    };
+    thread::sleep(Duration::from_millis(50));
+    assert!(
+        !waiter.is_finished(),
+        "must wait for the in-flight dispatch"
+    );
+    release.store(true, Ordering::SeqCst);
+    blocker.join().unwrap();
+    waiter.join().unwrap();
+    assert_eq!(
+        *outcome.lock().unwrap(),
+        Some(registry_io::WaitOutcome::Waited)
+    );
+}

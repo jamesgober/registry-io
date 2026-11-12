@@ -211,3 +211,20 @@ fn many_register_unregister_cycles_keep_state_stable() {
     let _ = registry.register(|_| {});
     assert_eq!(registry.handler_count(), 1);
 }
+
+// Review F-5 (1.1.0): every registry numbered its handlers from 1, so an
+// id passed to the wrong registry removed an unrelated handler there.
+#[test]
+fn an_id_from_another_registry_matches_nothing() {
+    let audit: SyncRegistry<()> = SyncRegistry::new();
+    let metrics: SyncRegistry<()> = SyncRegistry::new();
+    let audit_id = audit.register(|_| {});
+    let metrics_id = metrics.register(|_| {});
+    assert_ne!(audit_id, metrics_id);
+    assert!(
+        !metrics.unregister(audit_id),
+        "removed an unrelated handler"
+    );
+    assert!(metrics.contains(metrics_id));
+    assert!(audit.contains(audit_id));
+}

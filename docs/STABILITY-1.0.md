@@ -99,7 +99,11 @@ v1.1.0 on, these are frozen on the same terms as the table above.
   for), and it never runs again. It returns `false` without waiting
   when `id` is not registered. `clear_and_wait` gives the same
   guarantee for every handler it removes. The wait may be longer than
-  strictly necessary, never shorter.
+  strictly necessary, never shorter. One exception *(since 1.2.0)*: a
+  call made from inside a handler does not wait for another thread
+  that is blocked in the same kind of call from inside a handler of the
+  same registry (waiting would deadlock both);
+  `try_unregister_and_wait` reports it as `WaitOutcome::WouldDeadlock`.
 - **`register_once`** *(since 1.1.0)*. The handler runs at most once,
   even under concurrent `notify` calls, and is unregistered after it
   runs or panics. It does not keep the registry alive.
@@ -195,9 +199,8 @@ contract support.
 
 - With default features the crate has **no runtime dependencies**
   (since 1.1.0).
-- `futures-core` (optional, behind the `async` feature) is
-  **reserved**; not currently used directly. It may receive
-  minor/patch bumps with no semver impact on registry-io.
+- No feature adds a runtime dependency (since 1.2.0, which removed the
+  unused optional `futures-core`).
 - New dependencies may be added behind opt-in features.
 - The `[dev-dependencies]` set may change freely.
 

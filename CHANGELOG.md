@@ -9,13 +9,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+---
+
+## [1.2.0] - 2026-11-11
+
+Fixes from an independent review. Additive only: every item frozen by
+[`docs/STABILITY-1.0.md`](docs/STABILITY-1.0.md) keeps its signature;
+MSRV unchanged (1.85). The crate now has no runtime dependencies under
+any feature set.
+
 ### Added
 
-### Changed
+- **`SyncRegistry::try_unregister_and_wait(&self, id) -> WaitOutcome`**
+  and the `#[non_exhaustive]` **`WaitOutcome`** enum (`Waited`,
+  `NotRegistered`, `WouldDeadlock`): `unregister_and_wait` that reports
+  whether it could wait for every thread.
+- `tests/loom_handshake.rs`: loom models of the hazard-pointer
+  handshake, with reader-side reclamation racing a writer, and a CI job
+  that runs them.
 
 ### Fixed
 
-### Security
+- `unregister_and_wait` (and `clear_and_wait`) called from handlers on
+  two threads at once blocked both threads for ever: each waited for the
+  dispatch the other was inside. A call made from inside a handler no
+  longer waits for another thread blocked the same way, so both return;
+  `try_unregister_and_wait` reports `WouldDeadlock` when that happened,
+  because that thread may still run the removed handler until its own
+  dispatch returns.
+- While one thread was inside a dispatch of a handler list that a
+  `register` or `unregister` had replaced (a slow handler), every
+  `notify` on every thread took the writer try-lock, scanned every
+  hazard record and allocated, until that dispatch returned. Reader-side
+  reclamation no longer allocates, and a reader tries it only when it
+  was itself reading a replaced list, or once after each write. Measured
+  on Windows x86_64 (1 handler, release, fat LTO, three alternating
+  rounds): `notify` with a pinned replaced list went from 82 to 185 ns
+  to 11 to 12 ns; the steady state is unchanged (10 to 14 ns both).
+- A panic payload whose `Drop` panics escaped `notify` (sync and async),
+  and the handlers after it did not run. A handler's captured state
+  whose `Drop` panics, freed by `notify` after the handler unregistered
+  itself, escaped the same way. Both are now contained.
+- Handler ids started at 1 in every registry, so an id passed to the
+  wrong registry removed an unrelated handler there. Ids now come from
+  one process-wide counter: an id from another registry matches nothing.
+
+### Removed
+
+- The unused optional `futures-core` dependency behind the `async`
+  feature. `async = ["std"]`.
+
+### Documentation
+
+- README: `PanicInfo` borrows the panic payload and is not `Send` or
+  `Sync`; the claim that every public type is `Send + Sync` now names
+  the registries and guards.
 
 ---
 
@@ -195,7 +243,8 @@ publication (the record-list head now uses `SeqCst`, so a new thread's
 first announcement can never be missed by a writer's scan). See
 [`docs/SECURITY.md`](docs/SECURITY.md).
 
-[Unreleased]: https://github.com/jamesgober/registry-io/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/jamesgober/registry-io/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/jamesgober/registry-io/releases/tag/v1.2.0
 [1.1.0]: https://github.com/jamesgober/registry-io/releases/tag/v1.1.0
 
 ---

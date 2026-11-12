@@ -27,6 +27,20 @@
 //! slot (almost always the first), one sequentially-consistent store, and
 //! one load to validate. Releasing is one release store. Scanning is
 //! `O(threads * SLOTS)` and only happens on the write path.
+//!
+//! # Memory ordering
+//!
+//! The handshake is the classic store-buffer pattern: the reader stores
+//! its announcement and loads the shared pointer; the writer stores the
+//! new pointer and scans the announcements, all `SeqCst`, so either the
+//! reader sees the new pointer (and retries) or the writer sees the
+//! announcement (and keeps the value).
+//!
+//! Loom treats `SeqCst` accesses as acquire/release and reports a false
+//! use-after-free for this form, so `tests/loom_handshake.rs` models the
+//! same protocol with `SeqCst` fences, which loom checks exactly. The
+//! code keeps the `SeqCst` store: on x86 it is one `xchg`, measured about
+//! 4 ns per `notify` faster than a relaxed store plus `mfence`.
 
 use core::cell::Cell;
 use core::ptr;
@@ -91,7 +105,8 @@ pub(crate) struct Pin {
 impl Pin {
     /// Publishes `p` in this slot. Sequentially consistent so that it is
     /// ordered before the validating load that follows, and against the
-    /// writer's swap and scan (the classic hazard-pointer handshake).
+    /// writer's swap and scan (the classic hazard-pointer handshake; see
+    /// the module documentation).
     #[inline]
     pub(crate) fn protect(&self, p: *const ()) {
         self.slot.store(p.cast_mut(), Ordering::SeqCst);
@@ -143,7 +158,7 @@ pub(crate) fn pin(p: *const ()) -> Option<Pin> {
 
 /// Whether the calling thread currently announces `p`, meaning the caller
 /// is running inside a dispatch over `p` on this thread.
-#[cfg(test)]
+#[cfg(any(test, feature = "sync"))]
 pub(crate) fn this_thread_protects(p: *const ()) -> bool {
     LOCAL
         .try_with(|local| {
@@ -161,13 +176,38 @@ pub(crate) fn this_thread_protects(p: *const ()) -> bool {
         .unwrap_or(false)
 }
 
-/// Whether any thread other than the caller announces `p`.
+/// Identity of the calling thread's record (its address), or `0` when
+/// the thread has none. Lets a waiter name itself to other waiters.
 #[cfg(any(test, feature = "sync"))]
-pub(crate) fn others_protect(p: *const ()) -> bool {
-    let own = LOCAL.try_with(|l| l.record.get()).unwrap_or(ptr::null());
-    let mut found = false;
+pub(crate) fn own_record() -> usize {
+    LOCAL
+        .try_with(|l| l.record.get())
+        .unwrap_or(ptr::null())
+        .addr()
+}
+
+/// Who, other than the caller, announces a pointer.
+#[cfg(any(test, feature = "sync"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Holders {
+    /// Nobody.
+    None,
+    /// Only threads in the excluded set.
+    OnlyExcluded,
+    /// At least one thread outside the excluded set.
+    Others,
+}
+
+/// Whether any thread other than the caller announces `p`, telling apart
+/// the threads whose records are listed in `excluded` (see
+/// [`own_record`]).
+#[cfg(any(test, feature = "sync"))]
+pub(crate) fn others_protect(p: *const (), excluded: &[usize]) -> Holders {
+    let own = own_record();
+    let mut found = Holders::None;
     for_each_record(|record| {
-        if ptr::eq(record, own) {
+        let id = ptr::from_ref(record).addr();
+        if id == own || found == Holders::Others {
             return;
         }
         if record
@@ -175,26 +215,31 @@ pub(crate) fn others_protect(p: *const ()) -> bool {
             .iter()
             .any(|slot| slot.load(Ordering::SeqCst).cast_const() == p)
         {
-            found = true;
+            found = if excluded.contains(&id) {
+                Holders::OnlyExcluded
+            } else {
+                Holders::Others
+            };
         }
     });
     found
 }
 
-/// Every pointer currently announced by any thread, in an unspecified
-/// order. Used by writers to decide which retired snapshots are safe to
-/// free.
-pub(crate) fn announced() -> Vec<*const ()> {
-    let mut out = Vec::new();
+/// Whether any thread, the caller included, announces `p`. Used to decide
+/// which retired snapshots are safe to free. Allocation-free.
+pub(crate) fn is_announced(p: *const ()) -> bool {
+    let mut found = false;
     for_each_record(|record| {
-        for slot in &record.slots {
-            let p = slot.load(Ordering::SeqCst);
-            if !p.is_null() {
-                out.push(p.cast_const());
-            }
+        if !found
+            && record
+                .slots
+                .iter()
+                .any(|slot| slot.load(Ordering::SeqCst).cast_const() == p)
+        {
+            found = true;
         }
     });
-    out
+    found
 }
 
 fn for_each_record(mut f: impl FnMut(&'static Record)) {
@@ -264,7 +309,7 @@ mod tests {
         {
             let _pin = pin(target).expect("slot available");
             assert!(this_thread_protects(target));
-            assert!(announced().contains(&target));
+            assert!(is_announced(target));
         }
         assert!(!this_thread_protects(target));
     }
@@ -293,13 +338,37 @@ mod tests {
             done_rx.recv().unwrap();
         });
         rx.recv().unwrap();
-        assert!(others_protect(target));
+        assert_eq!(others_protect(target, &[]), Holders::Others);
         let own = pin(core::ptr::without_provenance(0x3008)).expect("slot");
-        assert!(!others_protect(core::ptr::without_provenance(0x3008)));
+        assert_eq!(
+            others_protect(core::ptr::without_provenance(0x3008), &[]),
+            Holders::None
+        );
         drop(own);
         done_tx.send(()).unwrap();
         worker.join().unwrap();
-        assert!(!others_protect(target), "slot cleared at unpin");
+        assert_eq!(
+            others_protect(target, &[]),
+            Holders::None,
+            "slot cleared at unpin"
+        );
+    }
+
+    #[test]
+    fn others_protect_reports_excluded_holders_separately() {
+        let target: *const () = core::ptr::without_provenance(0x4000);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let worker = std::thread::spawn(move || {
+            let _pin = pin(core::ptr::without_provenance(0x4000)).expect("slot");
+            tx.send(own_record()).unwrap();
+            done_rx.recv().unwrap();
+        });
+        let id = rx.recv().unwrap();
+        assert_eq!(others_protect(target, &[id]), Holders::OnlyExcluded);
+        assert_eq!(others_protect(target, &[]), Holders::Others);
+        done_tx.send(()).unwrap();
+        worker.join().unwrap();
     }
 
     #[test]
