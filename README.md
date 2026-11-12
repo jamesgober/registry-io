@@ -64,6 +64,7 @@
 - **Panic counter** — `panic_count` reports caught handler panics with
   or without an `on_panic` callback.
 - **`Send + Sync`** — share registries freely across threads.
+- **No runtime dependencies** under any feature set.
 
 
 ---
@@ -102,7 +103,8 @@ Guarantees:
   or propagate to the caller.
 - **Priority-ordered dispatch** with stable ties.
 - **RAII unregistration** via `HandlerGuard` / `AsyncHandlerGuard`.
-- **`Send + Sync`** on every public type.
+- **`Send + Sync`** registries and guards (`PanicInfo`, a borrowed
+  callback argument, is neither).
 - **Cross-platform** — Linux, macOS, Windows on stable + MSRV
   1.85.0.
 

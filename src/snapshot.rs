@@ -15,10 +15,22 @@
 //!
 //! Writers never wait for readers, so a handler that unregisters itself
 //! (or anything else) from inside a dispatch cannot deadlock.
-//! [`SnapCell::wait_until_unused`] is the opt-in exception that does wait.
+//! [`SnapCell::wait_for_retired_readers`] is the opt-in exception that
+//! does wait.
+//!
+//! # Reader-side reclamation
+//!
+//! While a retired value is still announced (a handler that blocks keeps
+//! its dispatch open), readers must not all keep trying to free it: that
+//! made every `notify` take a try-lock and scan every hazard record (and,
+//! up to 1.1, allocate). A reader tries only when it was itself reading a
+//! retired value (it may be the last one), or once after each write
+//! (`write_gen` differs from `stale_gen`, the generation of the last
+//! attempt that had to leave values in place). Missed attempts only delay
+//! a free until the next write or attempt; they never free early.
 
 use core::cell::Cell;
-use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering, fence};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use crate::hazard;
@@ -36,10 +48,24 @@ pub(crate) struct SnapCell<T> {
     /// Number of retired values not yet freed. Read on every dispatch so
     /// the last reader of a retired value can free it promptly.
     retired_len: AtomicUsize,
+    /// Bumped by every write, under the writer lock.
+    write_gen: AtomicUsize,
+    /// `write_gen` as of the last reader-side reclaim that had to leave
+    /// retired values in place. Readers skip reclaiming while it matches.
+    stale_gen: AtomicUsize,
     /// Readers currently inside the locked fallback path (no hazard
     /// slot). They hold an owned `Arc` instead of an announcement, so
-    /// [`wait_until_unused`](Self::wait_until_unused) counts them here.
+    /// [`wait_for_retired_readers`](Self::wait_for_retired_readers) counts
+    /// them here.
     fallback_readers: AtomicUsize,
+    /// Hazard records (see [`hazard::own_record`]) of threads blocked in
+    /// [`wait_for_retired_readers`](Self::wait_for_retired_readers) from
+    /// inside a dispatch of this cell.
+    #[cfg(any(test, feature = "sync"))]
+    inside_waiters: Mutex<Vec<usize>>,
+    /// Reader-side reclaim attempts, for tests of the gate.
+    #[cfg(test)]
+    reclaim_attempts: AtomicUsize,
     /// Serializes writers and holds the retired values.
     writer: Mutex<Vec<Arc<T>>>,
 }
@@ -56,7 +82,13 @@ impl<T> SnapCell<T> {
         Self {
             current: AtomicPtr::new(Arc::into_raw(Arc::new(value)).cast_mut()),
             retired_len: AtomicUsize::new(0),
+            write_gen: AtomicUsize::new(0),
+            stale_gen: AtomicUsize::new(0),
             fallback_readers: AtomicUsize::new(0),
+            #[cfg(any(test, feature = "sync"))]
+            inside_waiters: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            reclaim_attempts: AtomicUsize::new(0),
             writer: Mutex::new(Vec::new()),
         }
     }
@@ -76,7 +108,7 @@ impl<T> SnapCell<T> {
         // hazard (see its documentation), so the value stays alive and
         // unaliased-by-writers until `pin` is dropped below.
         let out = f(unsafe { &*p });
-        self.release(pin);
+        self.release(pin, p);
         out
     }
 
@@ -104,12 +136,25 @@ impl<T> SnapCell<T> {
         }
     }
 
-    /// Drops the hazard, then frees retired values if this was the last
-    /// reader holding one.
+    /// Drops the hazard on `p`, then frees retired values if this may have
+    /// been the last reader holding one (see the module documentation).
     #[inline]
-    fn release(&self, pin: hazard::Pin) {
+    fn release(&self, pin: hazard::Pin, p: *mut T) {
         drop(pin);
         if self.retired_len.load(Ordering::Relaxed) != 0 {
+            self.maybe_reclaim(p);
+        }
+    }
+
+    /// The gate in front of [`try_reclaim`](Self::try_reclaim): only the
+    /// reader of a retired value, or the first reader after a write.
+    #[cold]
+    #[inline(never)]
+    fn maybe_reclaim(&self, p: *mut T) {
+        let read_retired = self.current.load(Ordering::Relaxed) != p;
+        let new_write =
+            self.write_gen.load(Ordering::Relaxed) != self.stale_gen.load(Ordering::Relaxed);
+        if read_retired || new_write {
             self.try_reclaim();
         }
     }
@@ -138,7 +183,7 @@ impl<T> SnapCell<T> {
         };
         // SAFETY: `protect` validated `p` under a published hazard.
         if !keep(unsafe { &*p }) {
-            self.release(pin);
+            self.release(pin, p);
             return None;
         }
         // SAFETY: `p` is the pointer `Arc::into_raw` produced (not one
@@ -149,7 +194,7 @@ impl<T> SnapCell<T> {
             Arc::increment_strong_count(p);
             Arc::from_raw(p)
         };
-        self.release(pin);
+        self.release(pin, p);
         Some(arc)
     }
 
@@ -209,6 +254,8 @@ impl<T> SnapCell<T> {
         writer.push(unsafe { Arc::from_raw(raw) });
         let freed = Self::collect_unprotected(&mut writer);
         self.retired_len.store(writer.len(), Ordering::Relaxed);
+        // Lets the next reader try once more to free what is left.
+        let _previous = self.write_gen.fetch_add(1, Ordering::Relaxed);
         drop(writer);
         drop(freed);
         Some(result)
@@ -237,11 +284,20 @@ impl<T> SnapCell<T> {
     /// fallback path they are not waited for, because they may include
     /// the caller.
     ///
+    /// When the caller is inside a dispatch of this cell, threads that are
+    /// themselves blocked here from inside a dispatch of this cell are not
+    /// waited for either: each would wait for the other's announcement for
+    /// ever. Returns `false` when such a thread still announced a retired
+    /// value (the wait is then incomplete), `true` otherwise.
+    ///
     /// Waiting spins briefly, then yields, then sleeps with a growing
     /// backoff capped at one millisecond.
     #[cfg(any(test, feature = "sync"))]
-    pub(crate) fn wait_for_retired_readers(&self) {
+    pub(crate) fn wait_for_retired_readers(&self) -> bool {
         let caller_on_fallback = FALLBACK_DEPTH.try_with(Cell::get).unwrap_or(0) > 0;
+        let own = hazard::own_record();
+        let inside = !caller_on_fallback && own != 0 && self.caller_inside_dispatch();
+        let _registered = inside.then(|| InsideWaiter::new(&self.inside_waiters, own));
         let mut round = 0u32;
         loop {
             let fallback_clear =
@@ -252,39 +308,82 @@ impl<T> SnapCell<T> {
                     .iter()
                     .map(|r| Arc::as_ptr(r).cast::<()>())
                     .collect();
-                if retired.iter().all(|p| !hazard::others_protect(*p)) {
-                    return;
+                let excluded: Vec<usize> = if inside {
+                    lock_vec(&self.inside_waiters).clone()
+                } else {
+                    Vec::new()
+                };
+                fence(Ordering::SeqCst);
+                let mut complete = true;
+                let mut busy = false;
+                for p in &retired {
+                    match hazard::others_protect(*p, &excluded) {
+                        hazard::Holders::None => {}
+                        hazard::Holders::OnlyExcluded => complete = false,
+                        hazard::Holders::Others => busy = true,
+                    }
+                }
+                if !busy {
+                    return complete;
                 }
             }
             backoff(&mut round);
         }
     }
 
+    /// Whether the calling thread announces a value of this cell, current
+    /// or retired: it is running inside a dispatch over this cell.
+    #[cfg(any(test, feature = "sync"))]
+    fn caller_inside_dispatch(&self) -> bool {
+        let writer = self.lock();
+        let current = self
+            .current
+            .load(Ordering::Acquire)
+            .cast_const()
+            .cast::<()>();
+        hazard::this_thread_protects(current)
+            || writer
+                .iter()
+                .any(|r| hazard::this_thread_protects(Arc::as_ptr(r).cast::<()>()))
+    }
+
     /// Frees retired values no hazard announces. Called by readers after
     /// they release their hazard; never blocks.
     #[cold]
     fn try_reclaim(&self) {
+        #[cfg(test)]
+        let _previous = self.reclaim_attempts.fetch_add(1, Ordering::SeqCst);
         let Ok(mut writer) = self.writer.try_lock() else {
             return;
         };
+        let generation = self.write_gen.load(Ordering::Relaxed);
         let freed = Self::collect_unprotected(&mut writer);
         self.retired_len.store(writer.len(), Ordering::Relaxed);
+        if !writer.is_empty() {
+            self.stale_gen.store(generation, Ordering::Relaxed);
+        }
         drop(writer);
-        drop(freed);
+        // This runs inside `notify`: a handler's captured state whose
+        // `Drop` panics must not unwind into the caller.
+        crate::panic::drop_contained(freed);
     }
 
     /// Moves every retired value that no thread announces out of the
-    /// list, for the caller to drop after releasing the lock.
+    /// list, for the caller to drop after releasing the lock. Allocates
+    /// only when it frees something.
     fn collect_unprotected(retired: &mut Vec<Arc<T>>) -> Vec<Arc<T>> {
         if retired.is_empty() {
             return Vec::new();
         }
-        let announced = hazard::announced();
+        // Orders a reader's release of its own announcement (a release
+        // store) before its scan on the reader-side path; the writer's
+        // swap is already `SeqCst`.
+        fence(Ordering::SeqCst);
         let mut freed = Vec::new();
         let mut i = 0;
         while i < retired.len() {
             let p: *const () = Arc::as_ptr(&retired[i]).cast();
-            if announced.contains(&p) {
+            if hazard::is_announced(p) {
                 i += 1;
             } else {
                 freed.push(retired.swap_remove(i));
@@ -310,6 +409,39 @@ impl<T> Drop for SnapCell<T> {
         // it; `raw` came from `Arc::into_raw` and is released exactly
         // once here. Retired values drop with the `Vec`.
         drop(unsafe { Arc::from_raw(raw) });
+    }
+}
+
+/// Locks a waiter list, recovering from poison (only `push` and `retain`
+/// run under it, so it is always consistent).
+#[cfg(any(test, feature = "sync"))]
+fn lock_vec(list: &Mutex<Vec<usize>>) -> MutexGuard<'_, Vec<usize>> {
+    list.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Lists the calling thread as an inside-dispatch waiter for as long as
+/// it lives.
+#[cfg(any(test, feature = "sync"))]
+struct InsideWaiter<'a> {
+    list: &'a Mutex<Vec<usize>>,
+    own: usize,
+}
+
+#[cfg(any(test, feature = "sync"))]
+impl<'a> InsideWaiter<'a> {
+    fn new(list: &'a Mutex<Vec<usize>>, own: usize) -> Self {
+        lock_vec(list).push(own);
+        Self { list, own }
+    }
+}
+
+#[cfg(any(test, feature = "sync"))]
+impl Drop for InsideWaiter<'_> {
+    fn drop(&mut self) {
+        let mut list = lock_vec(self.list);
+        if let Some(i) = list.iter().position(|r| *r == self.own) {
+            let _gone = list.swap_remove(i);
+        }
     }
 }
 
@@ -428,7 +560,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(20));
         assert!(!waiter.is_finished(), "must wait for the in-flight reader");
         release.store(true, Ordering::SeqCst);
-        waiter.join().unwrap();
+        assert!(waiter.join().unwrap());
         reader.join().unwrap();
     }
 
@@ -438,8 +570,49 @@ mod tests {
         cell.read(|_| {
             cell.replace(1);
             // Must return even though this thread still reads the old value.
-            cell.wait_for_retired_readers();
+            assert!(cell.wait_for_retired_readers());
         });
+    }
+
+    // Review F-2: while a reader sat inside a dispatch of a replaced
+    // value, every other reader took the writer try-lock and scanned the
+    // hazard records on every read. Readers of the current value now try
+    // once per write.
+    #[test]
+    fn readers_of_the_current_value_try_reclaim_once_per_write() {
+        let cell = Arc::new(SnapCell::new(0u32));
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let release = Arc::new(AtomicBool::new(false));
+        let reader = {
+            let (cell, release) = (Arc::clone(&cell), Arc::clone(&release));
+            std::thread::spawn(move || {
+                cell.read(|_| {
+                    entered_tx.send(()).unwrap();
+                    while !release.load(Ordering::SeqCst) {
+                        std::thread::yield_now();
+                    }
+                });
+            })
+        };
+        entered_rx.recv().unwrap();
+        cell.replace(1);
+        assert_eq!(cell.retired_len.load(Ordering::SeqCst), 1);
+        // The first read after the write tries and leaves the pinned value.
+        assert_eq!(cell.read(|v| *v), 1);
+        assert_eq!(
+            cell.stale_gen.load(Ordering::SeqCst),
+            cell.write_gen.load(Ordering::SeqCst)
+        );
+        // Later reads skip the attempt.
+        let attempts = cell.reclaim_attempts.load(Ordering::SeqCst);
+        for _ in 0..1000 {
+            assert_eq!(cell.read(|v| *v), 1);
+        }
+        assert_eq!(cell.reclaim_attempts.load(Ordering::SeqCst), attempts);
+        release.store(true, Ordering::SeqCst);
+        reader.join().unwrap();
+        // The pinned reader read a retired value, so it freed it.
+        assert_eq!(cell.retired_len.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -472,7 +645,7 @@ mod tests {
             "a reader of an older generation must be waited for"
         );
         release.store(true, Ordering::SeqCst);
-        waiter.join().unwrap();
+        assert!(waiter.join().unwrap());
         reader.join().unwrap();
     }
 

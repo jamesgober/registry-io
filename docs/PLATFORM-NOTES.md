@@ -96,9 +96,8 @@ the suggested next step is contributing a matrix entry to
 - **Rust toolchain**: stable 1.85.0 or newer.
 - **`cargo`** (bundled with rustup).
 
-That's it for using the crate. With default features it has no
-runtime dependencies at all; the `async` feature adds the pure-Rust
-`futures-core`. `tokio` and the other dev-dependencies are only used
+That's it for using the crate. It has no runtime dependencies under
+any feature set. `tokio` and the other dev-dependencies are only used
 by tests, examples, and benchmarks.
 
 ### Linux / macOS extras (development)

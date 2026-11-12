@@ -50,8 +50,10 @@
 //! - `std` (default) — enables the standard library. Required for sync and
 //!   async registries.
 //! - `sync` (default) — exposes [`SyncRegistry`]. Implies `std`.
-//! - `async` — reserved for a future release; exposes `AsyncRegistry` for
-//!   `async fn` handlers. Implies `std`.
+//! - `async`: exposes `AsyncRegistry` for `async fn` handlers. Implies
+//!   `std`.
+//!
+//! No feature adds a runtime dependency.
 //! - `hybrid` — activates both `sync` and `async`.
 //!
 //! # Out of scope
@@ -65,7 +67,7 @@
 //!
 //! Dual-licensed under Apache-2.0 OR MIT.
 
-#![doc(html_root_url = "https://docs.rs/registry-io/1.1.0")]
+#![doc(html_root_url = "https://docs.rs/registry-io/1.2.0")]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(not(feature = "std"), no_std)]
 #![deny(missing_docs)]
@@ -118,7 +120,7 @@ pub use panic::PanicInfo;
 
 #[cfg(feature = "sync")]
 #[cfg_attr(docsrs, doc(cfg(feature = "sync")))]
-pub use sync::{HandlerGuard, SyncRegistry};
+pub use sync::{HandlerGuard, SyncRegistry, WaitOutcome};
 
 #[cfg(feature = "async")]
 #[cfg_attr(docsrs, doc(cfg(feature = "async")))]

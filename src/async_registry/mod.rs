@@ -600,13 +600,14 @@ impl<E: Send + Sync + 'static> AsyncRegistry<E> {
             .clone();
         if let Some(holder) = holder {
             let info = PanicInfo::new(handler_id, payload.as_ref());
-            drop(std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-                || {
-                    holder.invoke(&info);
-                },
-            )));
+            if let Err(nested) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                holder.invoke(&info);
+            })) {
+                crate::panic::drop_payload(nested);
+            }
         }
-        drop(payload);
+        // A payload whose `Drop` panics must not escape `notify`.
+        crate::panic::drop_payload(payload);
     }
 }
 

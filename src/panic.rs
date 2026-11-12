@@ -199,3 +199,29 @@ impl PanicCallbackHolder {
         (self.inner)(info);
     }
 }
+
+/// Drops a caught panic payload without letting its destructor unwind.
+///
+/// A payload type whose `Drop` panics would otherwise unwind out of
+/// `notify`, skipping the handlers after the one that panicked. A payload
+/// whose destructor panics is leaked instead. The second payload is freed
+/// when it is the `&'static str` or `String` that `panic!` makes (their
+/// destructors cannot panic) and leaked otherwise, so this cannot recurse.
+pub(crate) fn drop_payload(payload: Box<dyn core::any::Any + Send>) {
+    drop_contained(payload);
+}
+
+/// Drops `value`, containing any panic from its destructor as
+/// [`drop_payload`] does.
+pub(crate) fn drop_contained<T>(value: T) {
+    let dropped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(value)));
+    if let Err(nested) = dropped {
+        match nested.downcast::<&'static str>() {
+            Ok(text) => drop(text),
+            Err(nested) => match nested.downcast::<std::string::String>() {
+                Ok(text) => drop(text),
+                Err(other) => core::mem::forget(other),
+            },
+        }
+    }
+}
